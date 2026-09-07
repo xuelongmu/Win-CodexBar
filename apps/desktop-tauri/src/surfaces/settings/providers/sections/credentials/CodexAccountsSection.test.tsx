@@ -93,6 +93,17 @@ describe("CodexAccountsSection", () => {
     });
   });
 
+  it("does not offer a desktop session restart for a no-op switch", async () => {
+    tauriMocks.getCodexAccountsState.mockResolvedValue({ accounts: [account("1")], snapshots: {} });
+    tauriMocks.codexAccountSwitch.mockResolvedValue({ switchId: "noop", desktopSessionRestorePath: null } as CodexSwitchResult);
+    render(<CodexAccountsSection t={t} />);
+    await screen.findByText("CodexAccountsSwitchButton");
+    await act(async () => { screen.getByText("CodexAccountsSwitchButton").click(); });
+    expect(screen.getByText("CodexSwitchSuccess")).toBeDefined();
+    expect(screen.queryByText("CodexAccountsRestartDesktop")).toBeNull();
+    expect(tauriMocks.codexAccountRestartDesktop).not.toHaveBeenCalled();
+  });
+
   it("adds an account and reloads", async () => {
     tauriMocks.getCodexAccountsState.mockResolvedValueOnce(
       { accounts: [], snapshots: {} } as CodexAccountsStateBridge,

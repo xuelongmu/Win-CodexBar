@@ -67,6 +67,35 @@ impl SavedLogin {
 #[derive(Default, Serialize, Deserialize)]
 struct Store {
     accounts: Vec<SavedLogin>,
+    #[serde(default)]
+    selected: Option<SelectedAccount>,
+}
+
+// Remember our own completed switch without reading credentials on list().
+// File stamps invalidate this knowledge after external login/config changes.
+#[derive(Serialize, Deserialize)]
+struct SelectedAccount {
+    id: String,
+    credentials: FileStamp,
+    config: FileStamp,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct FileStamp {
+    path: PathBuf,
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            modified: metadata.modified()?,
+            len: metadata.len(),
+        })
+    }
 }
 
 pub struct AccountManager {
@@ -151,7 +180,22 @@ impl AccountManager {
         } else {
             None
         };
-        let active = current.as_ref().map(SavedLogin::id).transpose()?;
+        let active = if consent {
+            current.as_ref().map(SavedLogin::id).transpose()?
+        } else {
+            store
+                .selected
+                .as_ref()
+                .filter(|selected| {
+                    FileStamp::read(&self.config_dir.join(".credentials.json"))
+                        .ok()
+                        .as_ref()
+                        == Some(&selected.credentials)
+                        && FileStamp::read(&self.config_file).ok().as_ref()
+                            == Some(&selected.config)
+                })
+                .map(|selected| selected.id.clone())
+        };
         let mut accounts = store
             .accounts
             .iter()
@@ -198,7 +242,7 @@ impl AccountManager {
         target.validate()?;
         if let Some(current) = read_login(&self.config_dir, &self.config_file)? {
             if current.id()? == id {
-                return Ok(());
+                return self.remember_selection(&mut store, id);
             }
             // Preserve the latest refresh token before replacing the active login.
             upsert(&mut store, current)?;
@@ -237,7 +281,16 @@ impl AccountManager {
             }));
         }
         super::clear_account_caches(&credential_path);
-        Ok(())
+        self.remember_selection(&mut store, id)
+    }
+
+    fn remember_selection(&self, store: &mut Store, id: &str) -> io::Result<()> {
+        store.selected = Some(SelectedAccount {
+            id: id.to_owned(),
+            credentials: FileStamp::read(&self.config_dir.join(".credentials.json"))?,
+            config: FileStamp::read(&self.config_file)?,
+        });
+        self.save(store)
     }
 }
 
@@ -353,6 +406,42 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list[0].is_saved && !list[0].is_active);
         assert!(manager.list_with_consent(true).is_err());
+    }
+
+    #[test]
+    fn selected_account_survives_without_consent_until_login_files_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let account_manager = manager(dir.path());
+        activate(&account_manager, &login("a", "one", "old"));
+        account_manager.import(login("b", "two", "new")).unwrap();
+        account_manager.switch("b:two").unwrap();
+        // Re-open the manager to prove selection is preserved across app launches.
+        let account_manager = manager(dir.path());
+        let accounts = account_manager.list_with_consent(false).unwrap();
+        assert!(accounts.iter().any(|a| a.id == "b:two" && a.is_active));
+        assert!(accounts.iter().any(|a| a.id == "a:one" && !a.is_active));
+        // A repeated explicit switch also records the known selection.
+        account_manager.switch("b:two").unwrap();
+        assert!(
+            account_manager
+                .list_with_consent(false)
+                .unwrap()
+                .iter()
+                .any(|a| a.id == "b:two" && a.is_active)
+        );
+        // Changed credentials invalidate the cached identity without parsing secrets.
+        std::fs::write(
+            account_manager.config_dir.join(".credentials.json"),
+            "externally replaced",
+        )
+        .unwrap();
+        assert!(
+            account_manager
+                .list_with_consent(false)
+                .unwrap()
+                .iter()
+                .all(|a| !a.is_active)
+        );
     }
 
     #[test]

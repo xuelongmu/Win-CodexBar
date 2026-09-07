@@ -282,6 +282,7 @@ impl CodexAccountApi {
         email_hint: Option<&str>,
         verify_live_data: bool,
     ) -> Result<AccountUsageSnapshot, CodexApiError> {
+        let _credentials = super::CREDENTIAL_OPERATIONS.read().await;
         let mut credentials = load_credentials(codex_home_path)?;
 
         if credentials.needs_refresh()

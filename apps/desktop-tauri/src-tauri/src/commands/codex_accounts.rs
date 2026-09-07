@@ -254,17 +254,16 @@ pub async fn codex_account_switch(
     .map_err(into_user_message)?;
 
     // Materialized ambient account may need persisting.
-    *PENDING_RESTART.lock().map_err(|e| e.to_string())? = Some(result.clone());
+    *PENDING_RESTART.lock().map_err(|e| e.to_string())? = result
+        .desktop_session_restore_path
+        .as_ref()
+        .map(|_| result.clone());
     let pending = {
         let state = app.state::<Mutex<AppState>>();
         let mut state = state.lock().map_err(|e| e.to_string())?;
         invalidate_account_usage(&mut state, ProviderId::Codex)
     };
     events::emit_provider_updated(&app, &pending);
-    let refresh_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = do_refresh_providers(&refresh_app).await;
-    });
     if let Some(materialized) = &result.materialized_account {
         let mut accounts = load_codex_accounts()?;
         if let Some(entry) = accounts.iter_mut().find(|a| a.matches(materialized)) {
@@ -274,6 +273,12 @@ pub async fn codex_account_switch(
         }
         persist_codex_accounts(&accounts)?;
     }
+
+    // Discovery must see the persisted account ID before a lane fetch starts.
+    let refresh_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = do_refresh_providers(&refresh_app).await;
+    });
 
     events::emit_settings_changed(&app);
     accounts_changed(&app);
