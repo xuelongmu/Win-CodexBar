@@ -93,6 +93,9 @@ An absolute `CLAUDE_CONFIG_DIR` inherited by Win-CodexBar selects a custom CLI h
 This account feature follows the [documented Windows Claude Code credential
 file](https://code.claude.com/docs/en/authentication), `.claude\.credentials.json`.
 It does not manage macOS Keychain logins or custom keyring integrations.
+On Windows, the isolated sign-in process belongs to a job that terminates it if
+Win-CodexBar exits. Startup also removes abandoned UUID sign-in directories;
+cleanup skips links and reparse points.
 
 These controls switch **Claude Code CLI**, not Claude Desktop or browser sessions.
 Usage monitoring still follows the provider's source settings and the

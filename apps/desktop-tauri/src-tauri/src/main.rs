@@ -260,6 +260,9 @@ fn main() {
             floatbar::set_float_bar_orientation,
         ])
         .setup(move |app| {
+            if let Err(error) = codexbar::providers::claude::accounts::cleanup_abandoned_logins() {
+                tracing::warn!("failed to clean abandoned Claude sign-in directories: {error}");
+            }
             if let Some(window) = app.get_webview_window("main") {
                 shell::dwm::force_dark_caption(&window);
                 window.hide()?;

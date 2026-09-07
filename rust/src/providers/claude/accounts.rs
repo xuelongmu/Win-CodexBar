@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::secure_file;
 
-pub use login::{begin_login, cancel_login, login, require_cli_closed};
+pub use login::{begin_login, cancel_login, cleanup_abandoned_logins, login, require_cli_closed};
 
 /// Serializes account changes with our own OAuth and CLI token refreshes.
 pub static CREDENTIAL_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

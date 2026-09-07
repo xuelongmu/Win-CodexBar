@@ -215,9 +215,12 @@ pub fn codex_account_remove(app: tauri::AppHandle, id: String) -> Result<(), Str
         .find(|account| account.id.to_string() == id)
         .ok_or_else(|| "Codex account not found.".to_string())?;
 
+    let mut pending_restart = PENDING_RESTART.lock().map_err(|e| e.to_string())?;
     manager
         .remove_managed_files_if_owned(target)
         .map_err(into_user_message)?;
+    invalidate_restart_for_removed_account(&mut pending_restart, target);
+    drop(pending_restart);
 
     let remaining: Vec<CodexAccount> = accounts
         .into_iter()
@@ -227,6 +230,31 @@ pub fn codex_account_remove(app: tauri::AppHandle, id: String) -> Result<(), Str
     events::emit_settings_changed(&app);
     accounts_changed(&app);
     Ok(())
+}
+
+fn invalidate_restart_for_removed_account(
+    pending: &mut Option<CodexSwitchResult>,
+    removed: &CodexAccount,
+) {
+    if pending.as_ref().is_some_and(|result| {
+        result
+            .materialized_account
+            .as_ref()
+            .is_some_and(|account| account.matches(removed))
+            || result
+                .ambient_account
+                .as_ref()
+                .is_some_and(|account| account.matches(removed))
+            || [
+                &result.desktop_session_backup_path,
+                &result.desktop_session_restore_path,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|path| path.parent() == Some(removed.codex_home_path.as_path()))
+    }) {
+        *pending = None;
+    }
 }
 
 #[tauri::command]
@@ -417,6 +445,42 @@ pub fn get_codex_accounts_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_an_involved_account_revokes_the_pending_session_restart() {
+        let mut outgoing = sample_account();
+        outgoing.provider_account_id = Some("outgoing".into());
+        outgoing.codex_home_path = "/tmp/outgoing".into();
+        let active = sample_account();
+        let mut unrelated = sample_account();
+        unrelated.provider_account_id = Some("unrelated".into());
+        unrelated.codex_home_path = "/tmp/unrelated".into();
+        let result = CodexSwitchResult {
+            switch_id: Uuid::new_v4(),
+            materialized_account: Some(outgoing.clone()),
+            ambient_account: Some(active.clone()),
+            backup_path: None,
+            desktop_session_backup_path: Some(outgoing.codex_home_path.join("desktop-session")),
+            desktop_session_restore_path: Some(active.codex_home_path.join("desktop-session")),
+            desktop_session_restore_exists: false,
+        };
+        let mut pending = Some(result.clone());
+        invalidate_restart_for_removed_account(&mut pending, &unrelated);
+        assert!(pending.is_some());
+        for removed in [&outgoing, &active] {
+            let mut pending = Some(result.clone());
+            invalidate_restart_for_removed_account(&mut pending, removed);
+            assert!(pending.is_none());
+            assert!(
+                validate_pending_restart(
+                    pending.as_ref(),
+                    &result.switch_id.to_string(),
+                    Some(&active)
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn superseded_lanes_cannot_overwrite_newer_snapshots() {
