@@ -103,6 +103,7 @@ pub(crate) fn persist_codex_accounts(accounts: &[CodexAccount]) -> Result<(), St
 pub(crate) async fn refresh_codex_account_lanes(
     app: tauri::AppHandle,
     fetch_permits: Arc<tokio::sync::Semaphore>,
+    generation: u64,
 ) {
     let accounts = match load_codex_accounts() {
         Ok(accounts) => accounts,
@@ -148,16 +149,36 @@ pub(crate) async fn refresh_codex_account_lanes(
         }));
     }
 
-    let mut snapshots = SnapshotStore::new().load().unwrap_or_default();
+    let mut updates = Vec::new();
     for handle in handles {
         if let Ok(Some((id, snapshot))) = handle.await {
-            snapshots.insert(id, snapshot);
+            updates.push((id, snapshot));
         }
     }
-    if let Err(e) = SnapshotStore::new().save(&snapshots) {
-        tracing::warn!("codex account lanes: failed to persist snapshots: {e}");
+    // Hold the generation owner through the read/merge/write so an invalidated
+    // batch cannot overwrite a replacement batch's account snapshots.
+    let state = app.state::<Mutex<AppState>>();
+    let Ok(state) = state.lock() else { return };
+    match save_codex_lane_results(&state, generation, updates) {
+        Ok(false) => return,
+        Err(e) => tracing::warn!("codex account lanes: failed to persist snapshots: {e}"),
+        Ok(true) => {}
     }
     events::emit_codex_accounts_updated(&app);
+}
+
+fn save_codex_lane_results(
+    state: &AppState,
+    generation: u64,
+    updates: Vec<(Uuid, codexbar::codex_accounts::AccountUsageSnapshot)>,
+) -> Result<bool, std::io::Error> {
+    if !is_current_provider_refresh_generation(state, generation) {
+        return Ok(false);
+    }
+    let mut snapshots = SnapshotStore::new().load()?;
+    snapshots.extend(updates);
+    SnapshotStore::new().save(&snapshots)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -391,6 +412,50 @@ pub fn get_codex_accounts_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superseded_lanes_cannot_overwrite_newer_snapshots() {
+        use codexbar::codex_accounts::{AccountUsageSnapshot, file_locations};
+        let root = std::env::temp_dir().join(format!("codex-lane-generation-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        file_locations::with_app_support_directory(root.clone());
+        let mut state = AppState::new();
+        let old_generation = state.provider_refresh_generation;
+        invalidate_account_usage(&mut state, ProviderId::Codex);
+        let id = Uuid::new_v4();
+        let snapshot = AccountUsageSnapshot {
+            email: Some("new@example.com".into()),
+            provider_account_id: Some("new".into()),
+            plan: None,
+            allowed: None,
+            limit_reached: None,
+            primary_window: None,
+            secondary_window: None,
+            credits: None,
+            updated_at: codexbar::codex_accounts::utc_now(),
+        };
+        assert!(
+            save_codex_lane_results(
+                &state,
+                state.provider_refresh_generation,
+                vec![(id, snapshot.clone())]
+            )
+            .unwrap()
+        );
+        let before = std::fs::read(file_locations::snapshots_file()).unwrap();
+        let stale = AccountUsageSnapshot {
+            email: Some("old@example.com".into()),
+            ..snapshot
+        };
+        assert!(!save_codex_lane_results(&state, old_generation, vec![(id, stale)]).unwrap());
+        assert_eq!(
+            std::fs::read(file_locations::snapshots_file()).unwrap(),
+            before
+        );
+        file_locations::clear_app_support_directory_override();
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn restart_rejects_superseded_prompts_and_external_identity_changes() {

@@ -55,7 +55,8 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange }: {
     }
   };
 
-  if (accounts.length <= 1 && !error) return null;
+  const hasSwitchableAccount = accounts.some(account => account.isSaved && !account.isActive);
+  if (accounts.length <= 1 && !hasSwitchableAccount && !error) return null;
   return (
     <details className="codex-menu-accounts" onToggle={onLayoutChange}>
       <summary className="codex-menu-accounts__summary">

@@ -29,6 +29,16 @@ describe("ClaudeAccountsMenu", () => {
     expect(screen.getByRole("status").textContent).toBe("ClaudeAccountsSwitched");
   });
 
+  it("shows a single inactive saved account so the first login can be activated", async () => {
+    mocks.claudeAccountsList.mockResolvedValue([second]);
+    render(<ClaudeAccountsMenu hideEmail={false} />);
+    await screen.findByText(second.email);
+    const button = screen.getByText("CodexAccountsSwitchButton");
+    expect(button).not.toBeDisabled();
+    await act(async () => fireEvent.click(button));
+    expect(mocks.claudeAccountSwitch).toHaveBeenCalledWith(second.id);
+  });
+
   it("masks emails, including tooltips, when hideEmail is enabled", async () => {
     mocks.claudeAccountsList.mockResolvedValue([first, { ...second, organization: `${second.email}'s Organization` }]);
     const { container } = render(<ClaudeAccountsMenu hideEmail />);

@@ -49,11 +49,11 @@ struct CachedCliResult {
 static CLI_RESULT_CACHE: LazyLock<Mutex<Option<CachedCliResult>>> =
     LazyLock::new(|| Mutex::new(None));
 
-fn clear_account_caches() {
+fn clear_account_caches(credential_path: &std::path::Path) {
     if let Ok(mut cache) = CLI_RESULT_CACHE.lock() {
         *cache = None;
     }
-    oauth::clear_account_cache();
+    oauth::clear_account_cache(credential_path);
 }
 
 /// Store a successful CLI fetch result in the 15-minute cache.

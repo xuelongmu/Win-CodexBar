@@ -15,8 +15,11 @@ use crate::core::{NamedRateWindow, ProviderError, ProviderFetchResult, RateWindo
 mod credentials_store;
 mod refresh;
 
-pub(super) fn clear_account_cache() {
+pub(super) fn clear_account_cache(credential_path: &std::path::Path) {
     credentials_store::clear_cache();
+    clear_refresh_backoff(&credentials_store::CredentialSource::File(
+        credential_path.to_path_buf(),
+    ));
 }
 
 /// OAuth credentials from Claude CLI

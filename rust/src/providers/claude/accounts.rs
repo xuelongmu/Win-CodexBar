@@ -236,7 +236,7 @@ impl AccountManager {
                 "Claude identity update failed. Both accounts remain saved; close Claude Code and retry switching.".into()
             }));
         }
-        super::clear_account_caches();
+        super::clear_account_caches(&credential_path);
         Ok(())
     }
 }
