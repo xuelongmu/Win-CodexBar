@@ -140,6 +140,7 @@ describe("CodexAccountsSection", () => {
     });
     expect(tauriMocks.codexAccountRestartDesktop).toHaveBeenCalledTimes(1);
     expect(tauriMocks.codexAccountRestartDesktop).toHaveBeenCalledWith("latest-switch");
+    expect(screen.queryByText("CodexAccountsRestartDesktop")).toBeNull();
   });
 });
 

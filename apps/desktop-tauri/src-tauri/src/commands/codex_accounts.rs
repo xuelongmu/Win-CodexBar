@@ -322,6 +322,9 @@ pub async fn codex_account_restart_desktop(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+    // The outgoing session backup is single-use. Replaying it after relaunch
+    // would overwrite that backup with the newly active account's session.
+    *PENDING_RESTART.lock().map_err(|e| e.to_string())? = None;
     Ok(())
 }
 

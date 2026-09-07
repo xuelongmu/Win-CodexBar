@@ -136,9 +136,8 @@ export function CodexAccountsSection({ t }: Props) {
     setBusy(true);
     setError(null);
     try {
-      await codexAccountRestartDesktop(
-        switchResult.switchId,
-      );
+      await codexAccountRestartDesktop(switchResult.switchId);
+      setSwitchResult(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
