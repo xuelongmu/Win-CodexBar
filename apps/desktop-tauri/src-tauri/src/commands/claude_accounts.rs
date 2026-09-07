@@ -1,6 +1,6 @@
-use super::ProviderUsageSnapshot;
+use super::invalidate_account_usage;
 use crate::state::AppState;
-use codexbar::core::{ProviderId, ProviderStateKind, instantiate_provider};
+use codexbar::core::ProviderId;
 use codexbar::providers::claude::accounts::{self, AccountManager, ClaudeAccount};
 use std::sync::Mutex;
 use tauri::Emitter;
@@ -86,7 +86,7 @@ pub async fn claude_account_switch(app: tauri::AppHandle, id: String) -> Result<
     let pending = {
         let state = app.state::<Mutex<AppState>>();
         let mut state = state.lock().map_err(|e| e.to_string())?;
-        invalidate_claude_usage(&mut state)
+        invalidate_account_usage(&mut state, ProviderId::Claude)
     };
     crate::events::emit_provider_updated(&app, &pending);
     drop(_credentials);
@@ -97,27 +97,6 @@ pub async fn claude_account_switch(app: tauri::AppHandle, id: String) -> Result<
     Ok(())
 }
 
-fn invalidate_claude_usage(state: &mut AppState) -> ProviderUsageSnapshot {
-    // Discard in-flight results and the old account's last-good fallback.
-    state.provider_refresh_generation = state.provider_refresh_generation.wrapping_add(1);
-    state.is_refreshing = false;
-    state.provider_refresh_started_at = None;
-    state
-        .transient_provider_failure_counts
-        .remove(&ProviderId::Claude);
-    state
-        .provider_cache
-        .retain(|snapshot| snapshot.provider_id != "claude");
-    let pending = ProviderUsageSnapshot::from_error(
-        ProviderId::Claude,
-        instantiate_provider(ProviderId::Claude).metadata(),
-        "Account changed. Refreshing Claude usage…".into(),
-        ProviderStateKind::Unknown,
-    );
-    state.provider_cache.push(pending.clone());
-    pending
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,7 +104,7 @@ mod tests {
     #[test]
     fn switching_invalidates_old_identity_usage_and_inflight_results() {
         let mut state = AppState::new();
-        let mut old = invalidate_claude_usage(&mut state);
+        let mut old = invalidate_account_usage(&mut state, ProviderId::Claude);
         old.account_email = Some("old@example.com".into());
         old.plan_name = Some("old-plan".into());
         old.error = None;
@@ -136,7 +115,7 @@ mod tests {
             .transient_provider_failure_counts
             .insert(ProviderId::Claude, 1);
         let generation = state.provider_refresh_generation;
-        let pending = invalidate_claude_usage(&mut state);
+        let pending = invalidate_account_usage(&mut state, ProviderId::Claude);
         assert!(pending.account_email.is_none());
         assert!(pending.plan_name.is_none());
         assert!(pending.error.is_some());

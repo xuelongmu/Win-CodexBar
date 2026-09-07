@@ -90,6 +90,9 @@ Saved logins are protected with the existing Windows DPAPI storage helper under
 that directory. Switching updates `claudeAiOauth` in the CLI credentials file and
 `oauthAccount` in the CLI configuration, preserving other settings and MCP secrets.
 An absolute `CLAUDE_CONFIG_DIR` inherited by Win-CodexBar selects a custom CLI home.
+This account feature follows the [documented Windows Claude Code credential
+file](https://code.claude.com/docs/en/authentication), `.claude\.credentials.json`.
+It does not manage macOS Keychain logins or custom keyring integrations.
 
 These controls switch **Claude Code CLI**, not Claude Desktop or browser sessions.
 Usage monitoring still follows the provider's source settings and the

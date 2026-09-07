@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
@@ -17,6 +16,7 @@ use super::*;
 
 const DEFAULT_FETCH_TIMEOUT_SECONDS: u64 = 60;
 static ACCOUNT_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PENDING_RESTART: Mutex<Option<CodexSwitchResult>> = Mutex::new(None);
 
 /// All stored + discovered Codex accounts, with the stored list preferred.
 pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
@@ -233,6 +233,17 @@ pub async fn codex_account_switch(
     .map_err(into_user_message)?;
 
     // Materialized ambient account may need persisting.
+    *PENDING_RESTART.lock().map_err(|e| e.to_string())? = Some(result.clone());
+    let pending = {
+        let state = app.state::<Mutex<AppState>>();
+        let mut state = state.lock().map_err(|e| e.to_string())?;
+        invalidate_account_usage(&mut state, ProviderId::Codex)
+    };
+    events::emit_provider_updated(&app, &pending);
+    let refresh_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = do_refresh_providers(&refresh_app).await;
+    });
     if let Some(materialized) = &result.materialized_account {
         let mut accounts = load_codex_accounts()?;
         if let Some(entry) = accounts.iter_mut().find(|a| a.matches(materialized)) {
@@ -292,25 +303,37 @@ pub fn codex_account_snapshots()
 #[tauri::command]
 pub async fn codex_account_restart_desktop(
     _app: tauri::AppHandle,
-    session_root: Option<String>,
-    backup_destination: Option<String>,
-    restore_source: Option<String>,
+    switch_id: String,
 ) -> Result<(), String> {
+    let _mutation = ACCOUNT_MUTATION
+        .try_lock()
+        .map_err(|_| "A Codex account operation is already in progress.".to_string())?;
+    let pending = PENDING_RESTART.lock().map_err(|e| e.to_string())?.clone();
+    let active = CodexAccountManager::new().discover_ambient_account(&[]);
+    let pending = validate_pending_restart(pending.as_ref(), &switch_id, active.as_ref())?.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let session_root = session_root.map(PathBuf::from);
-        let backup_destination = backup_destination.map(PathBuf::from);
-        let restore_source = restore_source.map(PathBuf::from);
         restart_codex_desktop(
             0.8,
-            session_root.as_deref(),
-            backup_destination.as_deref(),
-            restore_source.as_deref(),
+            None,
+            pending.desktop_session_backup_path.as_deref(),
+            pending.desktop_session_restore_path.as_deref(),
         )
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn validate_pending_restart<'a>(
+    pending: Option<&'a CodexSwitchResult>,
+    switch_id: &str,
+    active: Option<&CodexAccount>,
+) -> Result<&'a CodexSwitchResult, String> {
+    pending.filter(|result| {
+        result.switch_id.to_string() == switch_id
+            && result.ambient_account.as_ref().zip(active).is_some_and(|(expected, current)| expected.matches(current))
+    }).ok_or_else(|| "The selected account changed after this restart prompt opened. Switch to the intended account again before restarting Codex Desktop.".into())
 }
 
 /// Merge discovered accounts back into the persisted list after identity
@@ -365,6 +388,55 @@ pub fn get_codex_accounts_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_rejects_superseded_prompts_and_external_identity_changes() {
+        let active = sample_account();
+        let pending = CodexSwitchResult {
+            switch_id: Uuid::new_v4(),
+            ambient_account: Some(active.clone()),
+            materialized_account: None,
+            backup_path: None,
+            desktop_session_backup_path: None,
+            desktop_session_restore_path: None,
+            desktop_session_restore_exists: false,
+        };
+        let id = pending.switch_id.to_string();
+        assert!(validate_pending_restart(Some(&pending), &id, Some(&active)).is_ok());
+        assert!(
+            validate_pending_restart(Some(&pending), &Uuid::new_v4().to_string(), Some(&active))
+                .is_err()
+        );
+        let mut other = active;
+        other.provider_account_id = Some("different-account".into());
+        assert!(validate_pending_restart(Some(&pending), &id, Some(&other)).is_err());
+        assert!(validate_pending_restart(None, &id, Some(&other)).is_err());
+    }
+
+    #[test]
+    fn codex_switch_supersedes_inflight_usage_and_keeps_other_providers() {
+        let mut state = AppState::new();
+        let other = invalidate_account_usage(&mut state, ProviderId::Claude);
+        let mut old = invalidate_account_usage(&mut state, ProviderId::Codex);
+        old.account_email = Some("old@example.com".into());
+        old.primary.used_percent = 80.0;
+        old.error = None;
+        state.provider_cache = vec![other, old];
+        state.is_refreshing = true;
+        let generation = state.provider_refresh_generation;
+        let pending = invalidate_account_usage(&mut state, ProviderId::Codex);
+        assert!(!is_current_provider_refresh_generation(&state, generation));
+        assert!(!state.is_refreshing);
+        assert_eq!(state.provider_cache.len(), 2);
+        assert!(
+            state
+                .provider_cache
+                .iter()
+                .any(|s| s.provider_id == "claude")
+        );
+        assert!(pending.account_email.is_none() && pending.error.is_some());
+        assert_eq!(pending.primary.used_percent, 0.0);
+    }
 
     #[test]
     fn reconciliation_replaces_changed_managed_identity_without_inheriting_metadata() {

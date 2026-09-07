@@ -120,7 +120,7 @@ describe("CodexAccountsSection", () => {
       { accounts: [account("1")], snapshots: {} } as CodexAccountsStateBridge,
     );
     tauriMocks.codexAccountSwitch.mockResolvedValue(
-      { desktopSessionRestoreExists: restoreExists, desktopSessionRestorePath: "C:/s", desktopSessionBackupPath: null } as CodexSwitchResult,
+      { switchId: "latest-switch", desktopSessionRestoreExists: restoreExists, desktopSessionRestorePath: "C:/s", desktopSessionBackupPath: null } as CodexSwitchResult,
     );
     render(<CodexAccountsSection t={t} />);
     await waitFor(() => {
@@ -139,6 +139,7 @@ describe("CodexAccountsSection", () => {
       screen.getByText("CodexAccountsRestartDesktop").click();
     });
     expect(tauriMocks.codexAccountRestartDesktop).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.codexAccountRestartDesktop).toHaveBeenCalledWith("latest-switch");
   });
 });
 

@@ -41,6 +41,7 @@ impl From<CodexApiError> for CodexAccountManagerError {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSwitchResult {
+    pub switch_id: Uuid,
     pub materialized_account: Option<CodexAccount>,
     pub backup_path: Option<PathBuf>,
     pub ambient_account: Option<CodexAccount>,
@@ -233,6 +234,7 @@ impl CodexAccountManager {
         );
 
         Ok(CodexSwitchResult {
+            switch_id: Uuid::new_v4(),
             materialized_account,
             backup_path,
             ambient_account: self.discover_ambient_account(existing),

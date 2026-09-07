@@ -137,9 +137,7 @@ export function CodexAccountsSection({ t }: Props) {
     setError(null);
     try {
       await codexAccountRestartDesktop(
-        null,
-        switchResult.desktopSessionBackupPath ?? null,
-        switchResult.desktopSessionRestorePath ?? null,
+        switchResult.switchId,
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));

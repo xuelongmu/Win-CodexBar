@@ -384,10 +384,6 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             tauri::async_runtime::spawn(async move {
                 match crate::commands::codex_account_switch(handle.clone(), id).await {
                     Ok(result) => {
-                        let refresh_handle = handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = crate::commands::do_refresh_providers(&refresh_handle).await;
-                        });
                         use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
                         if result.desktop_session_restore_path.is_some() {
                             let dialog_handle = handle.clone();
@@ -401,13 +397,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                             if restart {
                                 let result = crate::commands::codex_account_restart_desktop(
                                     handle.clone(),
-                                    None,
-                                    result
-                                        .desktop_session_backup_path
-                                        .map(|p| p.to_string_lossy().into_owned()),
-                                    result
-                                        .desktop_session_restore_path
-                                        .map(|p| p.to_string_lossy().into_owned()),
+                                    result.switch_id.to_string(),
                                 )
                                 .await;
                                 if let Err(error) = result {
