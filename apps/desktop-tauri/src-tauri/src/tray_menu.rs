@@ -21,6 +21,7 @@ pub(crate) fn codex_accounts_menu(
     accounts: &[CodexAccount],
     active: Option<&CodexAccount>,
     lang: Language,
+    hide_personal_info: bool,
 ) -> TrayMenuEntry {
     let text = |key| locale::get_text(lang, key);
     let mut children: Vec<_> = accounts
@@ -29,7 +30,19 @@ pub(crate) fn codex_accounts_menu(
             let is_active = active.is_some_and(|current| current.matches(account));
             let mut entry = TrayMenuEntry::check_item(
                 format!("switch_codex_account:{}", account.id),
-                account.display_name(),
+                if hide_personal_info
+                    && account
+                        .nickname
+                        .as_deref()
+                        .is_none_or(|n| n.trim().is_empty())
+                {
+                    codexbar::core::PersonalInfoRedactor::partial_redact_email(
+                        account.email_hint.as_deref(),
+                        true,
+                    )
+                } else {
+                    account.display_name()
+                },
                 is_active,
             );
             entry.disabled = is_active;
@@ -280,6 +293,7 @@ mod tests {
             &[first.clone(), second.clone()],
             Some(&first),
             Language::English,
+            false,
         );
         assert_eq!(menu.children[0].checked, Some(true));
         assert!(menu.children[0].disabled);
@@ -290,8 +304,15 @@ mod tests {
         assert_eq!(menu.children[1].checked, Some(false));
         assert!(!menu.children[1].disabled);
         assert!(menu_contains(&menu.children, "add_codex_account"));
-        let empty = codex_accounts_menu(&[], None, Language::English);
+        let empty = codex_accounts_menu(&[], None, Language::English, false);
         assert!(menu_contains(&empty.children, "add_codex_account"));
+        let mut email_account = second;
+        email_account.nickname = None;
+        email_account.email_hint = Some("private@example.com".into());
+        let private = codex_accounts_menu(&[email_account.clone()], None, Language::English, true);
+        assert!(!private.children[0].label.contains("private@example.com"));
+        let visible = codex_accounts_menu(&[email_account], None, Language::English, false);
+        assert_eq!(visible.children[0].label, "private@example.com");
     }
 
     #[test]

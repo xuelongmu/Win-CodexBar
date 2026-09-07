@@ -144,7 +144,12 @@ fn build_native_tray_menu(
         codexbar::codex_accounts::CodexAccountManager::new().discover_ambient_account(&accounts);
     spec.insert(
         0,
-        codex_accounts_menu(&accounts, active.as_ref(), settings.ui_language),
+        codex_accounts_menu(
+            &accounts,
+            active.as_ref(),
+            settings.ui_language,
+            settings.hide_personal_info,
+        ),
     );
     let claude_accounts = crate::commands::claude_accounts_list().unwrap_or_default();
     spec.insert(
@@ -379,6 +384,10 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             tauri::async_runtime::spawn(async move {
                 match crate::commands::codex_account_switch(handle.clone(), id).await {
                     Ok(result) => {
+                        let refresh_handle = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::commands::do_refresh_providers(&refresh_handle).await;
+                        });
                         use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
                         if result.desktop_session_restore_path.is_some() {
                             let dialog_handle = handle.clone();

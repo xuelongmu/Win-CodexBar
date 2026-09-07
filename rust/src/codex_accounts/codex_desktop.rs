@@ -121,14 +121,14 @@ function Sync-DesktopSessionState() {{
                 Write-Log ("Backed up session entry: " + $relativePath)
             }} catch {{
                 Write-Log ("Failed to back up session entry " + $relativePath + ": " + $_.Exception.Message)
+                throw
             }}
         }}
         Write-Log ("Backed up desktop session state to " + $backupDestination)
     }}
     if ($restoreSource) {{
         if (-not (Test-Path -LiteralPath $restoreSource)) {{
-            Write-Log ("Restore source is missing; leaving the current desktop session in place: " + $restoreSource)
-            return
+            Write-Log ("No saved session for target; clearing the previous desktop session: " + $restoreSource)
         }}
         foreach ($relativePath in $sessionEntries) {{
             try {{
@@ -137,6 +137,7 @@ function Sync-DesktopSessionState() {{
                 Write-Log ("Restored session entry: " + $relativePath)
             }} catch {{
                 Write-Log ("Failed to restore session entry " + $relativePath + ": " + $_.Exception.Message)
+                throw
             }}
         }}
         Write-Log ("Restored desktop session state from " + $restoreSource)
@@ -311,6 +312,12 @@ mod tests {
         std::fs::write(package.join("app/ChatGPT.exe"), b"fixture").unwrap();
         std::fs::write(package.join("AppxManifest.xml"),
             r#"<Package><Applications><Application Id="App" Executable="app/ChatGPT.exe" /></Applications></Package>"#).unwrap();
+        let session = dir.path().join("session");
+        let backup = dir.path().join("backup");
+        std::fs::create_dir_all(session.join("Local Storage")).unwrap();
+        std::fs::write(session.join("Local Storage/old-account"), b"old session").unwrap();
+        std::fs::write(session.join("Preferences"), b"old preferences").unwrap();
+        std::fs::write(session.join("unrelated-file"), b"preserve").unwrap();
         let script = format!(
             r#"
 $fixturePackage = {package}
@@ -336,7 +343,12 @@ function Start-Process {{ param($FilePath)
 if (-not $script:stopped -or -not $script:launched) {{ throw 'Restart did not complete' }}
 "#,
             package = powershell_literal_path(&package),
-            restart = build_restart_script(0.0, Some(&dir.path().join("session")), None, None)
+            restart = build_restart_script(
+                0.0,
+                Some(&session),
+                Some(&backup),
+                Some(&dir.path().join("missing-target"))
+            )
         );
         super::super::file_locations::clear_app_support_directory_override();
         let path = dir.path().join("test-restart.ps1");
@@ -350,6 +362,20 @@ if (-not $script:stopped -or -not $script:launched) {{ throw 'Restart did not co
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!session.join("Local Storage").exists());
+        assert!(!session.join("Preferences").exists());
+        assert_eq!(
+            std::fs::read(backup.join("Local Storage/old-account")).unwrap(),
+            b"old session"
+        );
+        assert_eq!(
+            std::fs::read(backup.join("Preferences")).unwrap(),
+            b"old preferences"
+        );
+        assert_eq!(
+            std::fs::read(session.join("unrelated-file")).unwrap(),
+            b"preserve"
         );
     }
 
@@ -396,9 +422,7 @@ if (-not $script:stopped -or -not $script:launched) {{ throw 'Restart did not co
         assert!(script.contains("Copy-SessionEntry $restoreSource $sessionRoot $relativePath"));
         assert!(script.contains("Clear-SessionEntry $sessionRoot $relativePath"));
         assert!(
-            script.contains(
-                "Restore source is missing; leaving the current desktop session in place"
-            )
+            script.contains("No saved session for target; clearing the previous desktop session")
         );
         assert!(script.contains("Failed to back up session entry"));
         assert!(script.contains("Failed to restore session entry"));

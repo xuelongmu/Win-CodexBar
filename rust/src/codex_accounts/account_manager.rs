@@ -367,6 +367,14 @@ impl CodexAccountManager {
         account: &CodexAccount,
     ) -> Result<Vec<PathBuf>, CodexAccountManagerError> {
         ensure_directories()?;
+        if self
+            .discovered_managed_account(&account.codex_home_path, &[])
+            .is_some_and(|fresh| !fresh.matches(account))
+        {
+            return Err(CodexAccountManagerError::Message(
+                "This managed home now belongs to a different account. Refresh the account list before removing it.".into(),
+            ));
+        }
         let mut targets: Vec<PathBuf> = vec![
             std::path::absolute(&account.codex_home_path)
                 .unwrap_or_else(|_| account.codex_home_path.clone()),
@@ -699,6 +707,24 @@ mod tests {
         assert!(!duplicate_home.exists());
         assert!(other_home.exists());
 
+        super::super::file_locations::clear_app_support_directory_override();
+    }
+
+    #[test]
+    fn removing_stale_account_preserves_replacement_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::file_locations::with_app_support_directory(dir.path().to_path_buf());
+        let home = dir.path().join("managed-homes/replaced");
+        std::fs::create_dir_all(&home).unwrap();
+        let stale = make_account(home.clone(), "old@example.com", "old-id");
+        write_auth(&home, "new@example.com", "new-id");
+        let before = std::fs::read(home.join("auth.json")).unwrap();
+        assert!(
+            CodexAccountManager::new()
+                .remove_managed_files_if_owned(&stale)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), before);
         super::super::file_locations::clear_app_support_directory_override();
     }
 

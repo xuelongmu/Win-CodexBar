@@ -29,7 +29,15 @@ pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
         .map_err(|e| e.to_string())?;
     let ambient = manager.discover_ambient_account(&existing);
 
-    let mut merged: Vec<CodexAccount> = managed.clone();
+    Ok(reconcile_codex_accounts(&existing, &managed, ambient))
+}
+
+fn reconcile_codex_accounts(
+    existing: &[CodexAccount],
+    managed: &[CodexAccount],
+    ambient: Option<CodexAccount>,
+) -> Vec<CodexAccount> {
+    let mut merged: Vec<CodexAccount> = managed.to_vec();
     if let Some(ambient) = ambient {
         if let Some(entry) = merged.iter_mut().find(|account| account.matches(&ambient)) {
             entry.merge_from(&ambient);
@@ -44,6 +52,14 @@ pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
         // The ambient home can change identity outside this app. Always use
         // its fresh discovery instead of retaining an old record for that path.
         .filter(|account| account.source.owns_files())
+        // A managed home can also be reauthenticated outside the app. Do not
+        // retain its former identity alongside the account now owning its auth.
+        .filter(|account| {
+            !managed.iter().any(|fresh| {
+                fresh.standardized_home_path() == account.standardized_home_path()
+                    && !fresh.matches(account)
+            })
+        })
         .map(|account| {
             let mut account = account.clone();
             if let Some(fresh) = managed.iter().find(|fresh| fresh.matches(&account)) {
@@ -60,7 +76,7 @@ pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
         }
     }
 
-    Ok(reconciled)
+    reconciled
 }
 
 /// Persist the given accounts to the account store.
@@ -349,6 +365,32 @@ pub fn get_codex_accounts_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconciliation_replaces_changed_managed_identity_without_inheriting_metadata() {
+        let mut stale = sample_account();
+        stale.nickname = Some("Former account".into());
+        let mut fresh = sample_account();
+        fresh.provider_account_id = Some("replacement".into());
+        fresh.email_hint = Some("replacement@example.com".into());
+        let accounts = reconcile_codex_accounts(&[stale.clone()], &[fresh.clone()], None);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, fresh.id);
+        assert_ne!(accounts[0].id, stale.id);
+        assert_eq!(accounts[0].nickname, None);
+        assert_eq!(accounts[0].email_hint, fresh.email_hint);
+    }
+
+    #[test]
+    fn reconciliation_preserves_metadata_for_unchanged_managed_identity() {
+        let mut stored = sample_account();
+        stored.nickname = Some("Work".into());
+        let fresh = sample_account();
+        let accounts = reconcile_codex_accounts(&[stored.clone()], &[fresh], None);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, stored.id);
+        assert_eq!(accounts[0].nickname, stored.nickname);
+    }
 
     fn sample_account() -> CodexAccount {
         CodexAccount::new(
