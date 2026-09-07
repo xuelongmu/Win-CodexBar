@@ -1,5 +1,6 @@
 //! Claude provider implementation
 
+pub mod accounts;
 mod admin_api;
 mod cli_reset;
 mod oauth;
@@ -47,6 +48,13 @@ struct CachedCliResult {
 
 static CLI_RESULT_CACHE: LazyLock<Mutex<Option<CachedCliResult>>> =
     LazyLock::new(|| Mutex::new(None));
+
+fn clear_account_caches() {
+    if let Ok(mut cache) = CLI_RESULT_CACHE.lock() {
+        *cache = None;
+    }
+    oauth::clear_account_cache();
+}
 
 /// Store a successful CLI fetch result in the 15-minute cache.
 fn cache_cli_result(result: ProviderFetchResult) {

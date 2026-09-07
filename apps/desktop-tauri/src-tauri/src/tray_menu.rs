@@ -54,6 +54,61 @@ pub(crate) fn codex_accounts_menu(
     )
 }
 
+pub(crate) fn claude_accounts_menu(
+    accounts: &[codexbar::providers::claude::accounts::ClaudeAccount],
+    lang: Language,
+    hide_personal_info: bool,
+) -> TrayMenuEntry {
+    let text = |key| locale::get_text(lang, key);
+    let mut children: Vec<_> = accounts
+        .iter()
+        .map(|account| {
+            let label = if hide_personal_info {
+                codexbar::core::PersonalInfoRedactor::partial_redact_email(
+                    Some(&account.email),
+                    true,
+                )
+            } else {
+                account.organization.as_ref().map_or_else(
+                    || account.email.clone(),
+                    |org| format!("{} ({org})", account.email),
+                )
+            };
+            let mut entry = TrayMenuEntry::check_item(
+                format!("switch_claude_account:{}", account.id),
+                label,
+                account.is_active,
+            );
+            entry.disabled = account.is_active || !account.is_saved;
+            entry
+        })
+        .collect();
+    if children.is_empty() {
+        children.push(TrayMenuEntry::status_row(
+            "claude_accounts_empty",
+            text(LocaleKey::ClaudeAccountsEmpty),
+        ));
+    }
+    children.push(TrayMenuEntry::separator());
+    children.push(TrayMenuEntry::item(
+        "add_claude_account",
+        text(LocaleKey::CodexAccountsAddButton),
+    ));
+    children.push(TrayMenuEntry::item(
+        "save_claude_account",
+        text(LocaleKey::ClaudeAccountsSaveCurrent),
+    ));
+    children.push(TrayMenuEntry::item(
+        "cancel_claude_login",
+        text(LocaleKey::ClaudeAccountsCancelLogin),
+    ));
+    TrayMenuEntry::submenu(
+        "claude_accounts",
+        text(LocaleKey::ClaudeAccountsTitle),
+        children,
+    )
+}
+
 impl TrayMenuEntry {
     fn item(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
@@ -237,6 +292,39 @@ mod tests {
         assert!(menu_contains(&menu.children, "add_codex_account"));
         let empty = codex_accounts_menu(&[], None, Language::English);
         assert!(menu_contains(&empty.children, "add_codex_account"));
+    }
+
+    #[test]
+    fn claude_menu_checks_current_account_and_routes_saved_accounts() {
+        use codexbar::providers::claude::accounts::ClaudeAccount;
+        let current = ClaudeAccount {
+            id: "a:org".into(),
+            email: "a@example.com".into(),
+            organization: None,
+            plan: None,
+            is_active: true,
+            is_saved: false,
+        };
+        let saved = ClaudeAccount {
+            id: "b:org".into(),
+            is_active: false,
+            is_saved: true,
+            ..current.clone()
+        };
+        let menu = claude_accounts_menu(&[current, saved], Language::English, false);
+        assert_eq!(menu.id.as_deref(), Some("claude_accounts"));
+        assert_eq!(menu.children[0].checked, Some(true));
+        assert!(menu.children[0].disabled);
+        assert_eq!(
+            menu.children[1].id.as_deref(),
+            Some("switch_claude_account:b:org")
+        );
+        assert!(!menu.children[1].disabled);
+        assert!(menu_contains(&menu.children, "add_claude_account"));
+        assert!(menu_contains(
+            &claude_accounts_menu(&[], Language::English, false).children,
+            "add_claude_account"
+        ));
     }
 
     fn menu_contains(menu: &[TrayMenuEntry], id: &str) -> bool {

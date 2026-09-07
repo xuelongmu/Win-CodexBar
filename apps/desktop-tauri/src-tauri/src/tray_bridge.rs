@@ -20,7 +20,9 @@ use crate::surface::SurfaceMode;
 use crate::surface_target::SurfaceTarget;
 #[cfg(test)]
 use crate::tray_menu::build_tray_menu;
-use crate::tray_menu::{TrayMenuEntry, build_tray_menu_with, codex_accounts_menu};
+use crate::tray_menu::{
+    TrayMenuEntry, build_tray_menu_with, claude_accounts_menu, codex_accounts_menu,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct MonitorScaleInfo {
@@ -144,6 +146,15 @@ fn build_native_tray_menu(
         0,
         codex_accounts_menu(&accounts, active.as_ref(), settings.ui_language),
     );
+    let claude_accounts = crate::commands::claude_accounts_list().unwrap_or_default();
+    spec.insert(
+        1,
+        claude_accounts_menu(
+            &claude_accounts,
+            settings.ui_language,
+            settings.hide_personal_info,
+        ),
+    );
     let entries = spec
         .iter()
         .map(|entry| build_native_menu_entry(app, entry))
@@ -192,6 +203,10 @@ enum MenuAction {
     /// Toggle the floating bar window on/off.
     ToggleFloatBar,
     AddCodexAccount,
+    AddClaudeAccount,
+    SaveClaudeAccount,
+    CancelClaudeLogin,
+    SwitchClaudeAccount(String),
     SwitchCodexAccount(String),
     Quit,
 }
@@ -211,6 +226,13 @@ fn resolve_menu_action(id: &str) -> Option<MenuAction> {
         "toggle_float_bar" => Some(MenuAction::ToggleFloatBar),
         "pop_out" => Some(MenuAction::OpenFlyout),
         "add_codex_account" => Some(MenuAction::AddCodexAccount),
+        "add_claude_account" => Some(MenuAction::AddClaudeAccount),
+        "save_claude_account" => Some(MenuAction::SaveClaudeAccount),
+        "cancel_claude_login" => Some(MenuAction::CancelClaudeLogin),
+        _ if id.starts_with("switch_claude_account:") => {
+            let id = id.strip_prefix("switch_claude_account:")?;
+            (!id.is_empty()).then(|| MenuAction::SwitchClaudeAccount(id.to_string()))
+        }
         _ if id.starts_with("switch_codex_account:") => {
             let id = id.strip_prefix("switch_codex_account:")?;
             uuid::Uuid::parse_str(id).ok()?;
@@ -389,6 +411,37 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                     }
                     Err(error) => show_account_message(&handle, &error),
                 }
+            });
+        }
+        Some(MenuAction::CancelClaudeLogin) => crate::commands::claude_account_cancel_login(),
+        Some(
+            action @ (MenuAction::AddClaudeAccount
+            | MenuAction::SaveClaudeAccount
+            | MenuAction::SwitchClaudeAccount(_)),
+        ) => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_dialog::DialogExt;
+                let (result, message) = match action {
+                    MenuAction::AddClaudeAccount => (
+                        crate::commands::claude_account_add(handle.clone()).await,
+                        "Claude Code account added. Select it to switch.",
+                    ),
+                    MenuAction::SaveClaudeAccount => (
+                        crate::commands::claude_account_save_current(handle.clone()).await,
+                        "Current Claude Code account saved.",
+                    ),
+                    MenuAction::SwitchClaudeAccount(id) => (
+                        crate::commands::claude_account_switch(handle.clone(), id).await,
+                        "Claude Code account switched. Reopen the Claude Code CLI to use it.",
+                    ),
+                    _ => unreachable!(),
+                };
+                handle
+                    .dialog()
+                    .message(result.err().unwrap_or_else(|| message.to_string()))
+                    .title("Claude Code accounts")
+                    .show(|_| {});
             });
         }
         Some(MenuAction::Transition(request)) => {
@@ -902,6 +955,26 @@ mod tests {
         assert!(menu_contains(&menu, "about"));
         assert!(menu_contains(&menu, "toggle_provider:codex"));
         assert!(menu_contains(&menu, "quit"));
+    }
+
+    #[test]
+    fn claude_account_actions_are_distinct_from_codex_and_reject_empty_ids() {
+        assert!(matches!(
+            resolve_menu_action("add_claude_account"),
+            Some(MenuAction::AddClaudeAccount)
+        ));
+        assert!(matches!(
+            resolve_menu_action("save_claude_account"),
+            Some(MenuAction::SaveClaudeAccount)
+        ));
+        assert!(matches!(
+            resolve_menu_action("cancel_claude_login"),
+            Some(MenuAction::CancelClaudeLogin)
+        ));
+        assert!(
+            matches!(resolve_menu_action("switch_claude_account:a:org"), Some(MenuAction::SwitchClaudeAccount(id)) if id == "a:org")
+        );
+        assert!(resolve_menu_action("switch_claude_account:").is_none());
     }
 
     #[test]

@@ -15,6 +15,10 @@ use crate::core::{NamedRateWindow, ProviderError, ProviderFetchResult, RateWindo
 mod credentials_store;
 mod refresh;
 
+pub(super) fn clear_account_cache() {
+    credentials_store::clear_cache();
+}
+
 /// OAuth credentials from Claude CLI
 #[derive(Debug, Clone)]
 pub struct ClaudeOAuthCredentials {
@@ -233,6 +237,7 @@ impl ClaudeOAuthFetcher {
     /// OAuth token first (like the Claude CLI does) so the panel stays green
     /// without the user having to re-run `claude`.
     pub async fn fetch(&self) -> Result<ProviderFetchResult, ProviderError> {
+        let _account_operation = super::accounts::CREDENTIAL_OPERATION.lock().await;
         let (credentials, source) = credentials_store::load_credentials()?;
         let (credentials, refresh_outcome) =
             self.ensure_fresh_credentials(credentials, source).await;
