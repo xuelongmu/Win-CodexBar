@@ -8,6 +8,16 @@ use super::{SavedLogin, read_login};
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
+const AUTH_OVERRIDES: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
 // Electron Desktop also uses claude.exe. Its Windows version resource says
 // "Claude"; the native CLI's says "Claude Code". Keep Desktop running.
 #[cfg(windows)]
@@ -56,18 +66,10 @@ fn command(executable: &Path, dir: &Path) -> Command {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // The login must use browser-based subscription auth, not inherited API auth.
-    for key in [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDECODE",
-    ] {
+    for key in AUTH_OVERRIDES {
         command.env_remove(key);
     }
+    command.env_remove("CLAUDECODE");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -151,23 +153,23 @@ fn wait_for_login(
     }
 }
 
-/// Existing CLI processes retain credentials in memory and may rotate them.
-/// Require them to exit; account management never terminates user tasks.
-pub fn require_cli_closed() -> io::Result<()> {
-    for key in [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-    ] {
-        if std::env::var_os(key).is_some_and(|v| !v.is_empty()) {
+fn require_subscription_environment(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> io::Result<()> {
+    for key in AUTH_OVERRIDES {
+        if get(key).is_some_and(|v| !v.is_empty()) {
             return Err(io::Error::other(format!(
                 "{key} overrides Claude subscription login. Unset it and restart Win-CodexBar before switching accounts."
             )));
         }
     }
+    Ok(())
+}
+
+/// Existing CLI processes retain credentials in memory and may rotate them.
+/// Require them to exit; account management never terminates user tasks.
+pub fn require_cli_closed() -> io::Result<()> {
+    require_subscription_environment(|key| std::env::var_os(key))?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -206,6 +208,24 @@ pub fn require_cli_closed() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_override_blocks_switching_and_is_removed_from_login_children() {
+        let descriptor = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
+        let error = require_subscription_environment(|key| {
+            (key == descriptor).then(|| std::ffi::OsString::from("3"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains(descriptor));
+        assert!(require_subscription_environment(|_| None).is_ok());
+        assert!(require_subscription_environment(|_| Some(std::ffi::OsString::new())).is_ok());
+        let command = command(Path::new("claude.exe"), Path::new("isolated"));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == descriptor && value.is_none())
+        );
+    }
 
     #[cfg(windows)]
     #[test]
