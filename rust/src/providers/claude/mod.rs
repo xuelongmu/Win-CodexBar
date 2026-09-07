@@ -360,6 +360,9 @@ async fn run_claude_pty_probe(
     probe: ClaudePtyProbeOptions,
 ) -> Result<String, ProviderError> {
     tokio::task::spawn_blocking(move || {
+        // Keep ownership in the worker: cancelling the async refresh does not
+        // stop spawn_blocking or its CLI process from rotating credentials.
+        let _account_operation = accounts::CREDENTIAL_OPERATION.blocking_lock();
         cleanup_probe_session_jsonl(&working_directory);
         let session_id = load_or_create_probe_session_id(&working_directory);
         let env = claude_passive_probe_env(TtyCommandRunner::enriched_environment());

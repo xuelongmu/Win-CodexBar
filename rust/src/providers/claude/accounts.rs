@@ -14,7 +14,7 @@ use crate::secure_file;
 
 pub use login::{begin_login, cancel_login, login, require_cli_closed};
 
-/// Serializes account changes with our own OAuth token refreshes.
+/// Serializes account changes with our own OAuth and CLI token refreshes.
 pub static CREDENTIAL_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug, Serialize)]
@@ -141,8 +141,16 @@ impl AccountManager {
     }
 
     pub fn list(&self) -> io::Result<Vec<ClaudeAccount>> {
+        self.list_with_consent(super::claude_code_consent())
+    }
+
+    fn list_with_consent(&self, consent: bool) -> io::Result<Vec<ClaudeAccount>> {
         let store = self.load()?;
-        let current = read_login(&self.config_dir, &self.config_file)?;
+        let current = if consent {
+            read_login(&self.config_dir, &self.config_file)?
+        } else {
+            None
+        };
         let active = current.as_ref().map(SavedLogin::id).transpose()?;
         let mut accounts = store
             .accounts
@@ -334,6 +342,20 @@ mod tests {
     }
 
     #[test]
+    fn discovery_without_consent_never_opens_ambient_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path());
+        manager.import(login("saved", "one", "stored")).unwrap();
+        // Opening either file would fail; listing saved metadata must still work.
+        std::fs::write(manager.config_dir.join(".credentials.json"), "invalid JSON").unwrap();
+        std::fs::write(&manager.config_file, "invalid JSON").unwrap();
+        let list = manager.list_with_consent(false).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].is_saved && !list[0].is_active);
+        assert!(manager.list_with_consent(true).is_err());
+    }
+
+    #[test]
     fn switching_preserves_settings_and_latest_outgoing_refresh_token() {
         let dir = tempfile::tempdir().unwrap();
         let manager = manager(dir.path());
@@ -369,7 +391,7 @@ mod tests {
         manager.import(login("b", "two", "new")).unwrap();
         assert!(
             manager
-                .list()
+                .list_with_consent(true)
                 .unwrap()
                 .iter()
                 .any(|a| a.is_active && !a.is_saved)
@@ -378,7 +400,7 @@ mod tests {
         manager.switch("a:one").unwrap();
         assert!(
             manager
-                .list()
+                .list_with_consent(true)
                 .unwrap()
                 .iter()
                 .any(|a| a.id == "a:one" && a.is_active && a.is_saved)
@@ -392,7 +414,7 @@ mod tests {
         manager.import(login("a", "one", "first")).unwrap();
         manager.import(login("a", "two", "second")).unwrap();
         manager.import(login("a", "one", "updated")).unwrap();
-        assert_eq!(manager.list().unwrap().len(), 2);
+        assert_eq!(manager.list_with_consent(true).unwrap().len(), 2);
         assert_eq!(
             manager.load().unwrap().accounts[0].oauth["accessToken"],
             "updated"
@@ -404,7 +426,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = manager(dir.path());
         manager.import(login("a", "one", "secret-token")).unwrap();
-        let json = serde_json::to_string(&manager.list().unwrap()).unwrap();
+        let json = serde_json::to_string(&manager.list_with_consent(true).unwrap()).unwrap();
         assert!(!json.contains("secret-token"));
         assert!(!json.contains("refreshToken"));
         assert!(json.contains("isSaved"));
@@ -437,7 +459,7 @@ mod tests {
         activate(&manager, &login("a", "one", "original"));
         manager.save_current().unwrap();
         manager.remove("a:one").unwrap();
-        let list = manager.list().unwrap();
+        let list = manager.list_with_consent(true).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].is_active && !list[0].is_saved);
         let path = manager.root.join("accounts.json");

@@ -64,6 +64,10 @@ $backupDestination = {backup_destination_literal}
 $restoreSource = {restore_source_literal}
 $sessionEntries = {session_entries_literal}
 New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($logPath)) -Force | Out-Null
+trap {{
+    Add-Content -LiteralPath $logPath -Value ("Restart failed: " + $_.Exception.Message)
+    exit 1
+}}
 function Write-Log([string]$message) {{
     Add-Content -LiteralPath $logPath -Value ("[{{0}}] {{1}}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $message)
 }}
@@ -158,14 +162,16 @@ if (-not $launcherPath.StartsWith($packageRoot, [StringComparison]::OrdinalIgnor
 }}
 Write-Log ("Using package launcher path: " + $launcherPath)
 Start-Sleep -Milliseconds {delay_ms}
-# Scope shutdown to this package's GUI executable. Standalone codex.exe
-# processes can belong to terminals or other agents and must stay running.
+# Do not kill process trees: this helper can descend from a Codex task.
+# Stop only this package's GUI executable, including its renderer processes.
+# Standalone codex.exe processes and the restart helper must stay running.
 $codexProcesses = Get-CimInstance Win32_Process | Where-Object {{
-    $_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath -and
-    $_.CommandLine -notmatch '--type='
+    $_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath
 }}
 foreach ($process in $codexProcesses) {{
-    & taskkill.exe /PID $process.ProcessId /F /T | Out-Null
+    if (-not (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {{ continue }}
+    Write-Log ("Stopping Desktop GUI process " + $process.ProcessId)
+    & taskkill.exe /PID $process.ProcessId /F 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {{
         throw 'Unable to stop Codex Desktop. Session files were left unchanged.'
     }}
@@ -223,7 +229,7 @@ pub fn build_restart_command(script_path: &Path) -> Vec<String> {
     ]
 }
 
-/// Write the restart script and launch a hidden PowerShell that runs it.
+/// Run the hidden restart script and report failures to the invoking surface.
 pub fn restart_codex_desktop(
     delay_seconds: f64,
     session_root: Option<&Path>,
@@ -261,9 +267,16 @@ fn launch_hidden_powershell(script_path: &Path) -> Result<(), CodexDesktopContro
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    command.spawn().map(|_| ()).map_err(|error| {
+    let status = command.status().map_err(|error| {
         CodexDesktopControlError::Message(format!("Failed to restart Codex Desktop: {error}"))
-    })
+    })?;
+    if !status.success() {
+        return Err(CodexDesktopControlError::Message(format!(
+            "Codex Desktop could not restart. Its session backup or restore may have failed. See {} for details.",
+            restart_log_path().display(),
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -304,6 +317,20 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn hidden_script_failure_is_returned_to_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("failure.ps1");
+        std::fs::write(&script, "throw 'Simulated session copy failure'").unwrap();
+        assert!(
+            launch_hidden_powershell(&script)
+                .unwrap_err()
+                .to_string()
+                .contains("could not restart")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn restart_uses_manifest_gui_and_leaves_standalone_cli_alone() {
         let dir = tempfile::tempdir().unwrap();
         super::super::file_locations::with_app_support_directory(dir.path().join("support"));
@@ -330,10 +357,12 @@ function Get-CimInstance {{
     }}
 }}
 function taskkill.exe {{
+    if ($args -contains '/T') {{ throw 'Process-tree shutdown would kill the restart helper' }}
     if ($args[1] -ne 987654321) {{ throw 'Attempted to stop standalone CLI' }}
     $script:stopped = $true
     $global:LASTEXITCODE = 0
 }}
+function Get-Process {{ param($Id) [pscustomobject]@{{ Id = $Id }} }}
 function Start-Sleep {{}}
 function Start-Process {{ param($FilePath)
     if ($FilePath -ne (Join-Path $fixturePackage 'app\ChatGPT.exe')) {{ throw 'Wrong launcher' }}
