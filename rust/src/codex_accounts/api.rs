@@ -4,7 +4,9 @@
 //! refreshes tokens via the OpenAI OAuth endpoint, fetches `wham/usage` (or a
 //! configured custom base URL) and normalizes the quota windows.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -20,6 +22,28 @@ pub const USAGE_DEFAULT_BASE: &str = "https://chatgpt.com/backend-api";
 pub const REFRESH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const UNAUTHORIZED_MESSAGE: &str = "The Codex usage API request returned unauthorized.";
+
+type CredentialLane = tokio::sync::Mutex<()>;
+static CREDENTIAL_LANES: LazyLock<Mutex<HashMap<PathBuf, Weak<CredentialLane>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn credential_lane(home: &Path) -> Result<Arc<CredentialLane>, CodexApiError> {
+    let path = home.join("auth.json").canonicalize().map_err(|error| {
+        CodexApiError::Message(format!(
+            "Could not resolve the account's auth file: {error}"
+        ))
+    })?;
+    let mut lanes = CREDENTIAL_LANES
+        .lock()
+        .map_err(|error| CodexApiError::Message(error.to_string()))?;
+    lanes.retain(|_, lane| lane.strong_count() > 0);
+    if let Some(lane) = lanes.get(&path).and_then(Weak::upgrade) {
+        return Ok(lane);
+    }
+    let lane = Arc::new(CredentialLane::new(()));
+    lanes.insert(path, Arc::downgrade(&lane));
+    Ok(lane)
+}
 
 /// Friendly error surfaced to callers.
 #[derive(Debug, Error)]
@@ -283,6 +307,19 @@ impl CodexAccountApi {
         verify_live_data: bool,
     ) -> Result<AccountUsageSnapshot, CodexApiError> {
         let _credentials = super::CREDENTIAL_OPERATIONS.read().await;
+        self.fetch_home_snapshot(codex_home_path, email_hint, verify_live_data)
+            .await
+    }
+
+    async fn fetch_home_snapshot(
+        &self,
+        codex_home_path: &Path,
+        email_hint: Option<&str>,
+        verify_live_data: bool,
+    ) -> Result<AccountUsageSnapshot, CodexApiError> {
+        // Read only after earlier fetches for this auth path have persisted any
+        // rotated tokens. Distinct homes retain independent fetch lanes.
+        let _home = credential_lane(codex_home_path)?.lock_owned().await;
         let mut credentials = load_credentials(codex_home_path)?;
 
         if credentials.needs_refresh()
@@ -753,6 +790,112 @@ fn credits_equivalent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn overlapping_fetches_reload_credentials_and_keep_other_homes_parallel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::time::{Duration, timeout};
+
+        async fn request(listener: &TcpListener) -> (TcpStream, String) {
+            let (mut stream, _) = timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(
+                    timeout(Duration::from_secs(5), stream.read_u8())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            (stream, String::from_utf8(headers).unwrap().to_lowercase())
+        }
+        async fn respond(mut stream: TcpStream) {
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        }
+        fn configure(home: &Path, address: std::net::SocketAddr, token: &str) {
+            std::fs::write(
+                home.join("config.toml"),
+                format!("chatgpt_base_url = \"http://{address}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                home.join("auth.json"),
+                serde_json::json!({"OPENAI_API_KEY":token}).to_string(),
+            )
+            .unwrap();
+        }
+        fn fetch(
+            home: PathBuf,
+        ) -> tokio::task::JoinHandle<Result<AccountUsageSnapshot, CodexApiError>> {
+            tokio::spawn(async move {
+                let api = CodexAccountApi {
+                    client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                };
+                // Exercise per-home concurrency independently of other tests
+                // that intentionally take the global account-switch write lock.
+                api.fetch_home_snapshot(&home, None, false).await
+            })
+        }
+
+        let first_home = tempfile::tempdir().unwrap();
+        let other_home = tempfile::tempdir().unwrap();
+        let first_server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        configure(
+            first_home.path(),
+            first_server.local_addr().unwrap(),
+            "old-token",
+        );
+        configure(
+            other_home.path(),
+            other_server.local_addr().unwrap(),
+            "other-token",
+        );
+        let first = fetch(first_home.path().to_owned());
+        let (first_stream, headers) = request(&first_server).await;
+        assert!(headers.contains("authorization: bearer old-token"));
+        // A lexical alias of the same auth path must share the first lane.
+        let second = fetch(first_home.path().join("."));
+        let other = fetch(other_home.path().to_owned());
+        let (other_stream, headers) = request(&other_server).await;
+        assert!(headers.contains("authorization: bearer other-token"));
+        respond(other_stream).await;
+        timeout(Duration::from_secs(5), other)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), first_server.accept())
+                .await
+                .is_err()
+        );
+
+        // Model a rotated token being persisted by the first in-flight fetch.
+        configure(
+            first_home.path(),
+            first_server.local_addr().unwrap(),
+            "rotated-token",
+        );
+        respond(first_stream).await;
+        timeout(Duration::from_secs(5), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let (second_stream, headers) = request(&first_server).await;
+        assert!(headers.contains("authorization: bearer rotated-token"));
+        respond(second_stream).await;
+        timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn parse_credentials_accepts_api_key() {

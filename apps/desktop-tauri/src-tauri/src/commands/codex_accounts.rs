@@ -292,17 +292,11 @@ pub async fn codex_account_switch(
         invalidate_account_usage(&mut state, ProviderId::Codex)
     };
     events::emit_provider_updated(&app, &pending);
-    if let Some(materialized) = &result.materialized_account {
-        let mut accounts = load_codex_accounts()?;
-        if let Some(entry) = accounts.iter_mut().find(|a| a.matches(materialized)) {
-            entry.merge_from(materialized);
-        } else {
-            accounts.push(materialized.clone());
-        }
-        persist_codex_accounts(&accounts)?;
-    }
+    persist_materialized_account(result.materialized_account.as_ref());
 
     // Discovery must see the persisted account ID before a lane fetch starts.
+    // Credential replacement is already committed. Even if optional account
+    // metadata cannot be saved, refresh and notify all surfaces of that switch.
     let refresh_app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = do_refresh_providers(&refresh_app).await;
@@ -311,6 +305,24 @@ pub async fn codex_account_switch(
     events::emit_settings_changed(&app);
     accounts_changed(&app);
     Ok(result)
+}
+
+fn persist_materialized_account(materialized: Option<&CodexAccount>) {
+    let Some(materialized) = materialized else {
+        return;
+    };
+    let persist = || -> Result<(), String> {
+        let mut accounts = load_codex_accounts()?;
+        if let Some(entry) = accounts.iter_mut().find(|a| a.matches(materialized)) {
+            entry.merge_from(materialized);
+        } else {
+            accounts.push(materialized.clone());
+        }
+        persist_codex_accounts(&accounts)
+    };
+    if let Err(error) = persist() {
+        tracing::warn!("Codex account switched but account metadata could not be saved: {error}");
+    }
 }
 
 #[tauri::command]
@@ -445,6 +457,26 @@ pub fn get_codex_accounts_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_switch_tolerates_unreadable_account_metadata() {
+        use codexbar::codex_accounts::file_locations;
+        let root = std::env::temp_dir().join(format!("codex-switch-metadata-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        file_locations::with_app_support_directory(root.clone());
+        let account_file = file_locations::accounts_file();
+        std::fs::write(&account_file, "invalid account metadata").unwrap();
+        // This post-commit operation cannot propagate an error to the switch
+        // command and skip the refresh/events that follow it.
+        persist_materialized_account(Some(&sample_account()));
+        assert_eq!(
+            std::fs::read_to_string(&account_file).unwrap(),
+            "invalid account metadata"
+        );
+        file_locations::clear_app_support_directory_override();
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn removing_an_involved_account_revokes_the_pending_session_restart() {
