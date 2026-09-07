@@ -20,7 +20,7 @@ use crate::surface::SurfaceMode;
 use crate::surface_target::SurfaceTarget;
 #[cfg(test)]
 use crate::tray_menu::build_tray_menu;
-use crate::tray_menu::{TrayMenuEntry, build_tray_menu_with};
+use crate::tray_menu::{TrayMenuEntry, build_tray_menu_with, codex_accounts_menu};
 
 #[derive(Debug, Clone, Copy)]
 struct MonitorScaleInfo {
@@ -130,12 +130,19 @@ fn build_native_tray_menu(
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let settings = Settings::load();
     let enabled = settings.enabled_providers.clone();
-    let spec = build_tray_menu_with(
+    let mut spec = build_tray_menu_with(
         providers,
         status_labels,
         &enabled,
         settings.float_bar_enabled,
         settings.ui_language,
+    );
+    let accounts = crate::commands::load_codex_accounts().unwrap_or_default();
+    let active =
+        codexbar::codex_accounts::CodexAccountManager::new().discover_ambient_account(&accounts);
+    spec.insert(
+        0,
+        codex_accounts_menu(&accounts, active.as_ref(), settings.ui_language),
     );
     let entries = spec
         .iter()
@@ -184,6 +191,8 @@ enum MenuAction {
     ToggleProvider(String),
     /// Toggle the floating bar window on/off.
     ToggleFloatBar,
+    AddCodexAccount,
+    SwitchCodexAccount(String),
     Quit,
 }
 
@@ -201,6 +210,12 @@ fn resolve_menu_action(id: &str) -> Option<MenuAction> {
         "about" => Some(MenuAction::OpenSettings("about".into())),
         "toggle_float_bar" => Some(MenuAction::ToggleFloatBar),
         "pop_out" => Some(MenuAction::OpenFlyout),
+        "add_codex_account" => Some(MenuAction::AddCodexAccount),
+        _ if id.starts_with("switch_codex_account:") => {
+            let id = id.strip_prefix("switch_codex_account:")?;
+            uuid::Uuid::parse_str(id).ok()?;
+            Some(MenuAction::SwitchCodexAccount(id.to_string()))
+        }
         _ if id.starts_with("toggle_provider:") => {
             let provider_id = id["toggle_provider:".len()..].to_string();
             Some(MenuAction::ToggleProvider(provider_id))
@@ -328,6 +343,54 @@ fn schedule_tray_promotion_retries(app_handle: AppHandle) {
 /// Route a native menu-item click to the corresponding shell action.
 fn handle_menu_event(app: &AppHandle, id: &str) {
     match resolve_menu_action(id) {
+        Some(MenuAction::AddCodexAccount) => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::commands::codex_account_add(handle.clone()).await {
+                    Ok(_) => show_account_message(&handle, "Codex account added."),
+                    Err(error) => show_account_message(&handle, &error),
+                }
+            });
+        }
+        Some(MenuAction::SwitchCodexAccount(id)) => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::commands::codex_account_switch(handle.clone(), id).await {
+                    Ok(result) => {
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                        if result.desktop_session_restore_path.is_some() {
+                            let dialog_handle = handle.clone();
+                            let restart = tauri::async_runtime::spawn_blocking(move || {
+                                dialog_handle.dialog()
+                                    .message("Account switched. Restart Codex Desktop to use it? This stops running desktop tasks.")
+                                    .title("Codex Accounts")
+                                    .buttons(MessageDialogButtons::OkCancelCustom("Restart".into(), "Later".into()))
+                                    .blocking_show()
+                            }).await.unwrap_or(false);
+                            if restart {
+                                let result = crate::commands::codex_account_restart_desktop(
+                                    handle.clone(),
+                                    None,
+                                    result
+                                        .desktop_session_backup_path
+                                        .map(|p| p.to_string_lossy().into_owned()),
+                                    result
+                                        .desktop_session_restore_path
+                                        .map(|p| p.to_string_lossy().into_owned()),
+                                )
+                                .await;
+                                if let Err(error) = result {
+                                    show_account_message(&handle, &error);
+                                }
+                            }
+                        } else {
+                            show_account_message(&handle, "Codex account switched.");
+                        }
+                    }
+                    Err(error) => show_account_message(&handle, &error),
+                }
+            });
+        }
         Some(MenuAction::Transition(request)) => {
             crate::auto_refresh::note_menu_open();
             match resolve_menu_transition_dispatch(id, request) {
@@ -394,6 +457,14 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         None => {}
     }
+}
+
+fn show_account_message(app: &AppHandle, message: &str) {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .message(message)
+        .title("Codex Accounts")
+        .show(|_| {});
 }
 
 /// Rebuild the native tray menu from current provider + settings state.

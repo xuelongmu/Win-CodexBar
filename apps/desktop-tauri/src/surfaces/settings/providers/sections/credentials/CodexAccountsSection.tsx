@@ -178,7 +178,7 @@ export function CodexAccountsSection({ t }: Props) {
       {switchResult && (
         <div className="provider-detail-note" role="status">
           {t("CodexSwitchSuccess")}
-          {switchResult.desktopSessionRestoreExists && (
+          {switchResult.desktopSessionRestorePath && (
             <>
               {" "}
               {t("CodexSwitchRestartPrompt")}{" "}

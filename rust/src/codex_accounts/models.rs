@@ -185,9 +185,6 @@ impl CodexAccount {
 
     /// Whether two accounts refer to the same identity.
     pub fn matches(&self, other: &CodexAccount) -> bool {
-        if self.standardized_home_path() == other.standardized_home_path() {
-            return true;
-        }
         if let (Some(a), Some(b)) = (
             self.normalized_provider_account_id(),
             other.normalized_provider_account_id(),
@@ -199,6 +196,9 @@ impl CodexAccount {
             || other.normalized_provider_account_id().is_some()
         {
             return false;
+        }
+        if self.standardized_home_path() == other.standardized_home_path() {
+            return true;
         }
         if let (Some(a), Some(b)) = (
             self.normalized_auth_subject(),
@@ -547,6 +547,12 @@ mod tests {
             Some("acct-2"),
         );
         assert!(!a.matches(&b));
+        let mut same_home = b.clone();
+        same_home.codex_home_path = a.codex_home_path.clone();
+        assert!(
+            !a.matches(&same_home),
+            "switching auth.json changes the identity at the same home"
+        );
     }
 
     #[test]

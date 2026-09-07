@@ -115,12 +115,12 @@ describe("CodexAccountsSection", () => {
     expect(tauriMocks.codexAccountAdd).toHaveBeenCalledTimes(1);
   });
 
-  it("switches an account and offers a desktop restart when a session can be restored", async () => {
+  it.each([true, false])("offers a desktop restart even for a first switch (saved session: %s)", async (restoreExists) => {
     tauriMocks.getCodexAccountsState.mockResolvedValue(
       { accounts: [account("1")], snapshots: {} } as CodexAccountsStateBridge,
     );
     tauriMocks.codexAccountSwitch.mockResolvedValue(
-      { desktopSessionRestoreExists: true, desktopSessionRestorePath: "C:/s", desktopSessionBackupPath: null } as CodexSwitchResult,
+      { desktopSessionRestoreExists: restoreExists, desktopSessionRestorePath: "C:/s", desktopSessionBackupPath: null } as CodexSwitchResult,
     );
     render(<CodexAccountsSection t={t} />);
     await waitFor(() => {

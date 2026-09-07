@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::commands::ProviderCatalogEntry;
+use codexbar::codex_accounts::CodexAccount;
 use codexbar::locale::{self, LocaleKey};
 use codexbar::settings::Language;
 
@@ -14,6 +15,43 @@ pub(crate) struct TrayMenuEntry {
     /// When `Some`, this entry renders as a check/checkbox item.
     /// `true` = checked (enabled), `false` = unchecked (disabled).
     pub(crate) checked: Option<bool>,
+}
+
+pub(crate) fn codex_accounts_menu(
+    accounts: &[CodexAccount],
+    active: Option<&CodexAccount>,
+    lang: Language,
+) -> TrayMenuEntry {
+    let text = |key| locale::get_text(lang, key);
+    let mut children: Vec<_> = accounts
+        .iter()
+        .map(|account| {
+            let is_active = active.is_some_and(|current| current.matches(account));
+            let mut entry = TrayMenuEntry::check_item(
+                format!("switch_codex_account:{}", account.id),
+                account.display_name(),
+                is_active,
+            );
+            entry.disabled = is_active;
+            entry
+        })
+        .collect();
+    if children.is_empty() {
+        children.push(TrayMenuEntry::status_row(
+            "codex_accounts_empty",
+            text(LocaleKey::CodexAccountsEmpty),
+        ));
+    }
+    children.push(TrayMenuEntry::separator());
+    children.push(TrayMenuEntry::item(
+        "add_codex_account",
+        text(LocaleKey::CodexAccountsAddButton),
+    ));
+    TrayMenuEntry::submenu(
+        "codex_accounts",
+        text(LocaleKey::CodexAccountsTitle),
+        children,
+    )
 }
 
 impl TrayMenuEntry {
@@ -163,6 +201,43 @@ pub(crate) fn build_tray_menu_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_accounts_can_be_switched_or_added_from_tray() {
+        use codexbar::codex_accounts::{CodexAccountSource, utc_now};
+        let make = |name: &str| {
+            CodexAccount::new(
+                uuid::Uuid::new_v4(),
+                Some(name.into()),
+                None,
+                None,
+                Some(name.into()),
+                std::path::PathBuf::from(name),
+                CodexAccountSource::ManagedByApp,
+                utc_now(),
+                utc_now(),
+                None,
+            )
+        };
+        let first = make("Personal");
+        let second = make("Work");
+        let menu = codex_accounts_menu(
+            &[first.clone(), second.clone()],
+            Some(&first),
+            Language::English,
+        );
+        assert_eq!(menu.children[0].checked, Some(true));
+        assert!(menu.children[0].disabled);
+        assert_eq!(
+            menu.children[1].id.as_deref(),
+            Some(format!("switch_codex_account:{}", second.id).as_str())
+        );
+        assert_eq!(menu.children[1].checked, Some(false));
+        assert!(!menu.children[1].disabled);
+        assert!(menu_contains(&menu.children, "add_codex_account"));
+        let empty = codex_accounts_menu(&[], None, Language::English);
+        assert!(menu_contains(&empty.children, "add_codex_account"));
+    }
 
     fn menu_contains(menu: &[TrayMenuEntry], id: &str) -> bool {
         menu.iter().any(|entry| {

@@ -71,7 +71,11 @@ function Clear-SessionEntry([string]$root, [string]$relativePath) {{
     if (-not $root) {{
         return
     }}
-    $targetPath = Join-Path $root $relativePath
+    $resolvedRoot = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot $relativePath))
+    if (-not $targetPath.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {{
+        throw 'Session entry escaped its root.'
+    }}
     if (Test-Path -LiteralPath $targetPath) {{
         Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
     }}
@@ -139,75 +143,42 @@ function Sync-DesktopSessionState() {{
     }}
 }}
 Write-Log 'Restart requested.'
-$mainProcess = Get-CimInstance Win32_Process | Where-Object {{
-    $_.Name -eq 'Codex.exe' -and
-    $_.ExecutablePath -and
-    $_.ExecutablePath -notlike '*\resources\codex.exe' -and
-    $_.CommandLine -notmatch '--type='
-}} | Select-Object -First 1
-$launcherPath = $mainProcess.ExecutablePath
-if ($launcherPath) {{
-    Write-Log ("Using running launcher path: " + $launcherPath)
+$package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $package -or -not $package.InstallLocation) {{
+    throw 'Unable to locate the Codex Desktop package.'
 }}
-if (-not $launcherPath) {{
-    $package = Get-AppxPackage | Where-Object {{
-        $_.Name -eq 'OpenAI.Codex' -or $_.PackageFamilyName -like 'OpenAI.Codex*'
-    }} | Sort-Object Version -Descending | Select-Object -First 1
-    if ($package -and $package.InstallLocation) {{
-        $launcherPath = Join-Path $package.InstallLocation 'app\Codex.exe'
-        Write-Log ("Using package launcher path: " + $launcherPath)
-    }}
-}}
-if (-not $launcherPath) {{
-    Write-Log 'Unable to locate the Codex Desktop executable.'
+$packageRoot = [System.IO.Path]::GetFullPath($package.InstallLocation).TrimEnd('\') + '\'
+[xml]$manifest = Get-Content -LiteralPath (Join-Path $packageRoot 'AppxManifest.xml')
+$application = $manifest.Package.Applications.Application | Select-Object -First 1
+$launcherPath = [System.IO.Path]::GetFullPath((Join-Path $packageRoot $application.Executable))
+if (-not $launcherPath.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    -not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {{
     throw 'Unable to locate the Codex Desktop executable.'
 }}
+Write-Log ("Using package launcher path: " + $launcherPath)
 Start-Sleep -Milliseconds {delay_ms}
+# Scope shutdown to this package's GUI executable. Standalone codex.exe
+# processes can belong to terminals or other agents and must stay running.
 $codexProcesses = Get-CimInstance Win32_Process | Where-Object {{
-    $_.Name -ieq 'Codex.exe' -or
-    $_.ExecutablePath -like '*\OpenAI.Codex_*\app\Codex.exe' -or
-    $_.ExecutablePath -like '*\OpenAI.Codex_*\app\resources\codex.exe'
+    $_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath -and
+    $_.CommandLine -notmatch '--type='
 }}
-Write-Log ("Found " + $codexProcesses.Count + " Codex processes to stop.")
-$codexProcesses | ForEach-Object {{
-    try {{
-        & taskkill.exe /PID $_.ProcessId /F /T | Out-Null
-        Write-Log ("taskkill succeeded for PID " + $_.ProcessId)
-    }} catch {{
-        Write-Log ("taskkill failed for PID " + $_.ProcessId + ": " + $_.Exception.Message)
-    }}
-    try {{
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
-        Write-Log ("Stop-Process succeeded for PID " + $_.ProcessId)
-    }} catch {{
-        Write-Log ("Stop-Process failed for PID " + $_.ProcessId + ": " + $_.Exception.Message)
+foreach ($process in $codexProcesses) {{
+    & taskkill.exe /PID $process.ProcessId /F /T | Out-Null
+    if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {{
+        throw 'Unable to stop Codex Desktop. Session files were left unchanged.'
     }}
 }}
 $deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline) {{
+do {{
     $remaining = Get-CimInstance Win32_Process | Where-Object {{
-        $_.Name -ieq 'Codex.exe' -or
-        $_.ExecutablePath -like '*\OpenAI.Codex_*\app\Codex.exe' -or
-        $_.ExecutablePath -like '*\OpenAI.Codex_*\app\resources\codex.exe'
+        $_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath
     }}
-    if (-not $remaining) {{
-        Write-Log 'All Codex processes exited.'
-        break
-    }}
-    Write-Log ("Still waiting for " + $remaining.Count + " Codex processes to exit.")
-    $remaining | ForEach-Object {{
-        try {{
-            & taskkill.exe /PID $_.ProcessId /F /T | Out-Null
-        }} catch {{}}
-    }}
+    if (-not $remaining) {{ break }}
     Start-Sleep -Milliseconds 250
-}}
-if (Get-CimInstance Win32_Process | Where-Object {{
-    $_.Name -ieq 'Codex.exe' -or
-    $_.ExecutablePath -like '*\OpenAI.Codex_*\app\Codex.exe' -or
-    $_.ExecutablePath -like '*\OpenAI.Codex_*\app\resources\codex.exe'
-}}) {{
-    Write-Log 'Continuing with relaunch after timeout while some Codex processes still appear alive.'
+}} while ((Get-Date) -lt $deadline)
+if ($remaining) {{
+    throw 'Codex Desktop is still running. Session files were left unchanged.'
 }}
 Sync-DesktopSessionState
 Start-Sleep -Milliseconds 700
@@ -330,6 +301,58 @@ fn powershell_string_array(values: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn restart_uses_manifest_gui_and_leaves_standalone_cli_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::file_locations::with_app_support_directory(dir.path().join("support"));
+        let package = dir.path().join("package");
+        std::fs::create_dir_all(package.join("app")).unwrap();
+        std::fs::write(package.join("app/ChatGPT.exe"), b"fixture").unwrap();
+        std::fs::write(package.join("AppxManifest.xml"),
+            r#"<Package><Applications><Application Id="App" Executable="app/ChatGPT.exe" /></Applications></Package>"#).unwrap();
+        let script = format!(
+            r#"
+$fixturePackage = {package}
+$script:stopped = $false
+function Get-AppxPackage {{ [pscustomobject]@{{ InstallLocation = $fixturePackage; Version = '1.0' }} }}
+function Get-CimInstance {{
+    [pscustomobject]@{{ ExecutablePath = 'C:\standalone\codex.exe'; ProcessId = 987654320; Name = 'codex.exe'; CommandLine = 'codex app-server' }}
+    if (-not $script:stopped) {{
+        [pscustomobject]@{{ ExecutablePath = (Join-Path $fixturePackage 'app\ChatGPT.exe'); ProcessId = 987654321; Name = 'ChatGPT.exe'; CommandLine = 'ChatGPT.exe' }}
+    }}
+}}
+function taskkill.exe {{
+    if ($args[1] -ne 987654321) {{ throw 'Attempted to stop standalone CLI' }}
+    $script:stopped = $true
+    $global:LASTEXITCODE = 0
+}}
+function Start-Sleep {{}}
+function Start-Process {{ param($FilePath)
+    if ($FilePath -ne (Join-Path $fixturePackage 'app\ChatGPT.exe')) {{ throw 'Wrong launcher' }}
+    $script:launched = $true
+}}
+{restart}
+if (-not $script:stopped -or -not $script:launched) {{ throw 'Restart did not complete' }}
+"#,
+            package = powershell_literal_path(&package),
+            restart = build_restart_script(0.0, Some(&dir.path().join("session")), None, None)
+        );
+        super::super::file_locations::clear_app_support_directory_override();
+        let path = dir.path().join("test-restart.ps1");
+        std::fs::write(&path, script).unwrap();
+        let argv = build_restart_command(&path);
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn build_restart_script_includes_restart_flow() {
         let script = build_restart_script(1.25, None, None, None);
@@ -337,7 +360,9 @@ mod tests {
         assert!(script.contains("Get-CimInstance Win32_Process"));
         assert!(script.contains("Get-AppxPackage"));
         assert!(script.contains("taskkill.exe /PID"));
-        assert!(script.contains("Stop-Process -Id $_.ProcessId -Force"));
+        assert!(script.contains("$manifest.Package.Applications.Application"));
+        assert!(script.contains("$_.ExecutablePath -ieq $launcherPath"));
+        assert!(!script.contains("$_.Name -ieq 'Codex.exe'"));
         assert!(script.contains("Start-Process -FilePath $launcherPath"));
         assert!(script.contains("Start-Sleep -Milliseconds 1250"));
     }

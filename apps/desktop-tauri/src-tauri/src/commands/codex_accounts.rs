@@ -16,6 +16,7 @@ use super::*;
 // ── Codex multi-account (ADR 0003, milestone 2) ──────────────────────
 
 const DEFAULT_FETCH_TIMEOUT_SECONDS: u64 = 60;
+static ACCOUNT_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// All stored + discovered Codex accounts, with the stored list preferred.
 pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
@@ -40,6 +41,9 @@ pub(crate) fn load_codex_accounts() -> Result<Vec<CodexAccount>, String> {
     // Reconcile persisted metadata (nickname, stored timestamps) for managed homes.
     let mut reconciled: Vec<CodexAccount> = existing
         .iter()
+        // The ambient home can change identity outside this app. Always use
+        // its fresh discovery instead of retaining an old record for that path.
+        .filter(|account| account.source.owns_files())
         .map(|account| {
             let mut account = account.clone();
             if let Some(fresh) = managed.iter().find(|fresh| fresh.matches(&account)) {
@@ -147,6 +151,9 @@ pub fn codex_accounts_list() -> Result<Vec<CodexAccount>, String> {
 
 #[tauri::command]
 pub async fn codex_account_add(app: tauri::AppHandle) -> Result<CodexAccount, String> {
+    let _mutation = ACCOUNT_MUTATION
+        .try_lock()
+        .map_err(|_| "A Codex account operation is already in progress.".to_string())?;
     let manager = CodexAccountManager::new();
     let account = tauri::async_runtime::spawn_blocking(move || manager.add_managed_account(None))
         .await
@@ -161,6 +168,9 @@ pub async fn codex_account_add(app: tauri::AppHandle) -> Result<CodexAccount, St
 
 #[tauri::command]
 pub fn codex_account_remove(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let _mutation = ACCOUNT_MUTATION
+        .try_lock()
+        .map_err(|_| "A Codex account operation is already in progress.".to_string())?;
     let manager = CodexAccountManager::new();
     let accounts = load_codex_accounts()?;
     let target = accounts
@@ -178,6 +188,7 @@ pub fn codex_account_remove(app: tauri::AppHandle, id: String) -> Result<(), Str
         .collect();
     persist_codex_accounts(&remaining)?;
     events::emit_settings_changed(&app);
+    accounts_changed(&app);
     Ok(())
 }
 
@@ -186,6 +197,9 @@ pub async fn codex_account_switch(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<CodexSwitchResult, String> {
+    let _mutation = ACCOUNT_MUTATION
+        .try_lock()
+        .map_err(|_| "A Codex account operation is already in progress.".to_string())?;
     let manager = CodexAccountManager::new();
     let accounts = load_codex_accounts()?;
     let target = accounts
@@ -214,6 +228,7 @@ pub async fn codex_account_switch(
     }
 
     events::emit_settings_changed(&app);
+    accounts_changed(&app);
     Ok(result)
 }
 
@@ -288,7 +303,14 @@ fn refresh_persisted_accounts(app: tauri::AppHandle) -> Result<(), String> {
     let accounts = load_codex_accounts()?;
     persist_codex_accounts(&accounts)?;
     events::emit_settings_changed(&app);
+    accounts_changed(&app);
     Ok(())
+}
+
+fn accounts_changed(app: &tauri::AppHandle) {
+    events::emit_codex_accounts_updated(app);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || crate::tray_bridge::rebuild_tray_menu(&handle));
 }
 
 fn into_user_message(error: CodexAccountManagerError) -> String {
