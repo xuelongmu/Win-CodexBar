@@ -101,10 +101,9 @@ These controls switch **Claude Code CLI**, not Claude Desktop or browser session
 Usage monitoring still follows the provider's source settings and the
 **Allow reading Claude Code's credentials** toggle. API-key or OAuth-token
 environment overrides must be removed before using saved subscription logins.
-When credential reading is disabled, the saved-account list identifies the active
-account from the non-secret `oauthAccount` metadata in the CLI configuration.
-It does not open the OAuth credential file, and token rotation does not clear the
-account indicator.
+When credential reading is disabled, active-account status is unknown and every
+saved account remains switchable. The list does not open ambient credential or
+identity files. Explicitly selecting the already-current account is a no-op.
 
 ## Source mode
 

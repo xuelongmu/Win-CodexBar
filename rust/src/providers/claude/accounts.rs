@@ -149,21 +149,10 @@ impl AccountManager {
         } else {
             None
         };
-        let active = if consent {
-            current.as_ref().map(SavedLogin::id).transpose()?
-        } else {
-            // Account identity is non-secret metadata in .claude.json. Avoid
-            // opening OAuth credentials, whose contents rotate independently.
-            self.config_dir
-                .join(".credentials.json")
-                .is_file()
-                .then(|| {
-                    read_object(&self.config_file)
-                        .ok()
-                        .and_then(|config| identity_id(&config["oauthAccount"]).ok())
-                })
-                .flatten()
-        };
+        // Without credential-read consent, activity is unknown. Stale identity
+        // metadata or unrelated credential entries cannot prove a live login.
+        // Leave saved accounts switchable; selecting the current one is a no-op.
+        let active = current.as_ref().map(SavedLogin::id).transpose()?;
         let mut accounts = store
             .accounts
             .iter()
@@ -374,58 +363,32 @@ mod tests {
     }
 
     #[test]
-    fn active_identity_without_consent_survives_token_rotation_and_tracks_config() {
+    fn unknown_activity_keeps_saved_accounts_switchable_after_logout() {
         let dir = tempfile::tempdir().unwrap();
         let account_manager = manager(dir.path());
-        activate(&account_manager, &login("a", "one", "old"));
-        account_manager.import(login("b", "two", "new")).unwrap();
-        account_manager.switch("b:two").unwrap();
-        // Identity remains available across app launches without opening tokens.
-        let account_manager = manager(dir.path());
-        let accounts = account_manager.list_with_consent(false).unwrap();
-        assert!(accounts.iter().any(|a| a.id == "b:two" && a.is_active));
-        assert!(accounts.iter().any(|a| a.id == "a:one" && !a.is_active));
-        // Repeating the switch leaves identity unchanged.
-        account_manager.switch("b:two").unwrap();
-        assert!(
-            account_manager
-                .list_with_consent(false)
-                .unwrap()
-                .iter()
-                .any(|a| a.id == "b:two" && a.is_active)
-        );
-        // Even unparseable credential contents cannot affect metadata-only discovery.
-        std::fs::write(
-            account_manager.config_dir.join(".credentials.json"),
-            "externally replaced",
-        )
-        .unwrap();
-        assert!(
-            account_manager
-                .list_with_consent(false)
-                .unwrap()
-                .iter()
-                .any(|a| a.id == "b:two" && a.is_active)
-        );
-        // An external account change is visible through the non-secret identity.
-        activate(&account_manager, &login("a", "one", "externally-rotated"));
-        assert!(
-            account_manager
-                .list_with_consent(false)
-                .unwrap()
-                .iter()
-                .any(|a| a.id == "a:one" && a.is_active)
-        );
-        std::fs::remove_file(account_manager.config_dir.join(".credentials.json")).unwrap();
-        assert!(
-            account_manager
-                .list_with_consent(false)
-                .unwrap()
-                .iter()
-                .all(|a| !a.is_active)
-        );
-    }
+        let saved = login("b", "two", "saved-token");
+        account_manager.import(saved.clone()).unwrap();
+        activate(&account_manager, &saved);
+        assert!(account_manager.list_with_consent(true).unwrap()[0].is_active);
+        assert!(!account_manager.list_with_consent(false).unwrap()[0].is_active);
 
+        // Logout can preserve unrelated secrets and stale account metadata.
+        let credential_path = account_manager.config_dir.join(".credentials.json");
+        let unrelated = json!({"mcpOAuth":{"secret":"preserved"},"pluginSecrets":{"x":"secret"}});
+        std::fs::write(&credential_path, unrelated.to_string()).unwrap();
+        for consent in [false, true] {
+            let accounts = account_manager.list_with_consent(consent).unwrap();
+            assert_eq!(accounts.len(), 1);
+            assert!(accounts[0].is_saved && !accounts[0].is_active);
+        }
+        account_manager.switch("b:two").unwrap();
+        let restored = read_object(&credential_path).unwrap();
+        assert_eq!(restored["claudeAiOauth"]["accessToken"], "saved-token");
+        assert_eq!(restored["mcpOAuth"], unrelated["mcpOAuth"]);
+        assert_eq!(restored["pluginSecrets"], unrelated["pluginSecrets"]);
+        assert!(account_manager.list_with_consent(true).unwrap()[0].is_active);
+        assert!(!account_manager.list_with_consent(false).unwrap()[0].is_active);
+    }
     #[cfg(windows)]
     #[test]
     fn switching_does_not_require_a_metadata_write_after_credentials_change() {
