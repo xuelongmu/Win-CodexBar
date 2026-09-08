@@ -533,7 +533,7 @@ impl CodexAccountManager {
     }
 }
 
-fn candidate_account(
+pub(super) fn candidate_account(
     identity: AuthBackedIdentity,
     home_path: &Path,
     source: CodexAccountSource,
