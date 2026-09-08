@@ -206,16 +206,67 @@ pub fn save_credentials(
 }
 
 fn write_auth_contents(home: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let auth_path = home.join("auth.json");
     // Preserve an existing auth-file symlink by replacing its resolved target.
     let destination = auth_path.canonicalize().unwrap_or(auth_path);
     let staged = destination.with_file_name(format!(".auth-{}.tmp", uuid::Uuid::new_v4()));
-    let result =
-        std::fs::write(&staged, contents).and_then(|()| std::fs::rename(&staged, &destination));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&staged)?;
+    let written = file.write_all(contents);
+    drop(file);
+    let result = written.and_then(|()| std::fs::rename(&staged, &destination));
     if result.is_err() {
         let _cleanup = std::fs::remove_file(staged);
     }
     result
+}
+
+fn synchronize_active_copy(ambient_home: &Path, managed_home: &Path) -> std::io::Result<()> {
+    let ambient_path = ambient_home.join("auth.json").canonicalize()?;
+    let managed_path = managed_home.join("auth.json").canonicalize()?;
+    if ambient_path == managed_path {
+        return Ok(());
+    }
+    let ambient_json = std::fs::read_to_string(ambient_path)?;
+    let managed_json = std::fs::read_to_string(managed_path)?;
+    if ambient_json == managed_json {
+        return Ok(());
+    }
+    let ambient = parse_credentials_json(&ambient_json).map_err(std::io::Error::other)?;
+    let managed = parse_credentials_json(&managed_json).map_err(std::io::Error::other)?;
+    let account = |credentials: &AuthCredentials, home: &Path, source| {
+        super::account_manager::candidate_account(
+            identity_from_credentials(credentials),
+            home,
+            source,
+        )
+    };
+    if !account(
+        &ambient,
+        ambient_home,
+        super::models::CodexAccountSource::Ambient,
+    )
+    .matches(&account(
+        &managed,
+        managed_home,
+        super::models::CodexAccountSource::ManagedByApp,
+    )) {
+        return Ok(());
+    }
+    // Older builds may already have refreshed only the managed copy. Recover
+    // its newer chain before making the ambient home authoritative for fetches.
+    if managed.last_refresh > ambient.last_refresh {
+        write_auth_contents(ambient_home, managed_json.as_bytes())
+    } else {
+        write_auth_contents(managed_home, ambient_json.as_bytes())
+    }
 }
 
 fn identity_from_credentials(credentials: &AuthCredentials) -> AuthBackedIdentity {
@@ -352,24 +403,22 @@ impl CodexAccountApi {
         // Read only after earlier fetches for this auth path have persisted any
         // rotated tokens. Distinct homes retain independent fetch lanes.
         let _home = credential_lane(codex_home_path)?.lock_owned().await;
+        let synchronize = || {
+            if let Some(managed) = managed_copy
+                && let Err(error) = synchronize_active_copy(codex_home_path, managed)
+            {
+                tracing::warn!(
+                    "Could not synchronize the active Codex account's managed credentials: {error}"
+                );
+            }
+        };
+        synchronize();
         let result = self
             .fetch_locked_snapshot(codex_home_path, email_hint, verify_live_data)
             .await;
         // A refresh can have rotated credentials even when the usage request
         // fails. Synchronize before releasing the shared ambient lane.
-        if let Some(managed) = managed_copy {
-            let source = codex_home_path.join("auth.json");
-            let destination = managed.join("auth.json");
-            if source.canonicalize().ok() != destination.canonicalize().ok() {
-                let sync = std::fs::read(&source)
-                    .and_then(|contents| write_auth_contents(managed, &contents));
-                if let Err(error) = sync {
-                    tracing::warn!(
-                        "Could not synchronize the active Codex account's managed credentials: {error}"
-                    );
-                }
-            }
-        }
+        synchronize();
         result
     }
 
@@ -856,8 +905,11 @@ mod tests {
         use tokio::net::TcpListener;
         use tokio::time::{Duration, timeout};
 
-        for (target_id, expected_token) in [("active", "ambient-token"), ("other", "managed-token")]
-        {
+        for (target_id, managed_newer, expected_token) in [
+            ("active", false, "ambient-token"),
+            ("active", true, "managed-token"),
+            ("other", true, "managed-token"),
+        ] {
             let ambient = tempfile::tempdir().unwrap();
             let managed = tempfile::tempdir().unwrap();
             let credentials = |account: &str, token: &str| AuthCredentials {
@@ -869,6 +921,24 @@ mod tests {
             };
             save_credentials(ambient.path(), &credentials("active", "ambient-token")).unwrap();
             save_credentials(managed.path(), &credentials(target_id, "managed-token")).unwrap();
+            let now = Utc::now();
+            for (home, refreshed) in [
+                (ambient.path(), now - chrono::TimeDelta::hours(1)),
+                (
+                    managed.path(),
+                    if managed_newer {
+                        now
+                    } else {
+                        now - chrono::TimeDelta::hours(2)
+                    },
+                ),
+            ] {
+                let path = home.join("auth.json");
+                let mut json: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                json["last_refresh"] = serde_json::json!(refreshed.to_rfc3339());
+                std::fs::write(path, json.to_string()).unwrap();
+            }
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let config = format!(
                 "chatgpt_base_url = \"http://{}\"\n",
@@ -908,7 +978,11 @@ mod tests {
             assert_eq!(saved.refresh_token, format!("refresh-{expected_token}"));
             assert_eq!(
                 load_credentials(ambient.path()).unwrap().access_token,
-                "ambient-token"
+                if target_id == "active" {
+                    expected_token
+                } else {
+                    "ambient-token"
+                }
             );
         }
     }
