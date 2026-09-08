@@ -942,6 +942,7 @@ export interface CodexAccountUsageSnapshot {
 }
 
 export interface CodexSwitchResult {
+  switchId: string;
   materializedAccount: CodexAccount | null;
   backupPath: string | null;
   ambientAccount: CodexAccount | null;
@@ -953,4 +954,12 @@ export interface CodexSwitchResult {
 export interface CodexAccountsStateBridge {
   accounts: CodexAccount[];
   snapshots: Record<string, CodexAccountUsageSnapshot>;
+}
+export interface ClaudeAccount {
+  id: string;
+  email: string;
+  organization: string | null;
+  plan: string | null;
+  isActive: boolean;
+  isSaved: boolean;
 }
