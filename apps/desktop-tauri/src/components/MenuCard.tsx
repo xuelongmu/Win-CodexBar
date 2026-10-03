@@ -294,6 +294,8 @@ export default function MenuCard({
 
       {provider.providerId === "codex" && (
         <CodexAccountsMenu
+          needsAuthentication={provider.errorState === "needsAuthentication"}
+          showAsUsed={showAsUsed}
           hideEmail={hideEmail}
           resetTimeRelative={resetTimeRelative}
           onLayoutChange={onLayoutChange}

@@ -5783,3 +5783,35 @@ button, input, select, textarea {
 .select {
   max-width: 240px;
 }
+
+/* Keep account usage and login actions discoverable in the tray. */
+.codex-menu-accounts__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.codex-menu-accounts__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.codex-menu-accounts__usage {
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.codex-menu-accounts__action {
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.codex-menu-accounts__action:disabled { opacity: 0.5; cursor: default; }
