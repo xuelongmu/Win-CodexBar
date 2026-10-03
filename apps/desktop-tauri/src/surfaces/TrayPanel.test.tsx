@@ -32,6 +32,7 @@ const tauriMocks = vi.hoisted(() => ({
   setUiLanguage: vi.fn(),
   getDeepSeekPricingStatus: vi.fn().mockResolvedValue(null),
   getUsageSpendSummary: vi.fn(),
+  claudeReconciliationState: vi.fn().mockResolvedValue(null),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -104,6 +105,18 @@ function provider(id: string, displayName: string, used = 20): ProviderUsageSnap
   };
 }
 
+function providerWithThreeQuotaWindows(
+  id: string,
+  displayName: string,
+): ProviderUsageSnapshot {
+  const snapshot = provider(id, displayName);
+  snapshot.secondary = rateWindow(35);
+  snapshot.secondaryLabel = "Weekly";
+  snapshot.tertiary = rateWindow(50);
+  snapshot.tertiaryLabel = "Monthly";
+  return snapshot;
+}
+
 function settings(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
   return {
     enabledProviders: ["codex", "claude"],
@@ -138,6 +151,7 @@ function settings(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
     resetTimeRelative: true,
     showResetWhenExhausted: false,
     menuBarDisplayMode: "detailed",
+    overviewLayout: "detailed",
     hidePersonalInfo: false,
     updateChannel: "stable",
     autoDownloadUpdates: false,
@@ -148,6 +162,7 @@ function settings(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
     theme: "dark",
     windowScalePercent: 125,
     trayScalePercent: 100,
+    trayPanelAlwaysOnTop: false,
     powertoysStatusPipeEnabled: false,
     claudeAvoidKeychainPrompts: false,
     codexSparkUsageVisible: true,
@@ -190,10 +205,16 @@ function renderTrayPanel(
   catalog: ProviderCatalogEntry[] = [],
 ) {
   tauriMocks.getCachedProviders.mockResolvedValue(providers);
-  tauriMocks.getSettingsSnapshot.mockResolvedValue(settings(settingsOverrides));
+  const snapshot = settings(settingsOverrides);
+  tauriMocks.getSettingsSnapshot.mockResolvedValue(snapshot);
   return render(
     <LocaleProvider>
-      <TrayPanel state={bootstrap(settingsOverrides, catalog)} />
+      <TrayPanel
+        state={{
+          ...bootstrap(settingsOverrides, catalog),
+          settings: snapshot,
+        }}
+      />
     </LocaleProvider>,
   );
 }
@@ -208,6 +229,7 @@ describe("TrayPanel provider grid", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     eventMocks.listeners.clear();
+    tauriMocks.claudeReconciliationState.mockResolvedValue(null);
     tauriMocks.getDeepSeekPricingStatus.mockResolvedValue(null);
     tauriMocks.getUsageSpendSummary.mockResolvedValue({ rows: [], models: [] });
     tauriMocks.flyoutStoredSize.mockResolvedValue(null);
@@ -250,6 +272,8 @@ describe("TrayPanel provider grid", () => {
         MenuAbout: "About CodexBar",
         MenuQuit: "Quit",
         MenuSettings: "Settings...",
+        ActionUsageDashboard: "Usage Dashboard",
+        ActionStatusPage: "Status Page",
         PanelAllProviders: "All providers",
         PanelAllProvidersShort: "All",
         PanelLeftSuffix: "left",
@@ -276,14 +300,13 @@ describe("TrayPanel provider grid", () => {
     // TrayPanel is now hosted exclusively in the dedicated `flyout` OS
     // window (see App.tsx's isFlyoutWindow() routing), so it must not depend
     // on `main`'s surface-mode machine to know it's "open" — that machine
-    // can never report "trayPanel" anymore (main only holds
-    // Hidden/PopOut/Settings post-refactor). Overriding the snapshot mock to
-    // something else confirms the fixed-size restore + reveal gate
+    // can report something other than "trayPanel". Overriding the snapshot
+    // mock to another mode confirms the fixed-size restore + reveal gate
     // (isFlyoutOpen, hardcoded true in TrayPanel.tsx) is no longer wired to
     // useSurfaceMode() at all.
     tauriMocks.getCurrentSurfaceState.mockResolvedValue({
-      mode: "popOut",
-      target: { kind: "dashboard" },
+      mode: "settings",
+      target: { kind: "settings", tab: "general" },
     });
 
     const { container } = renderTrayPanel([provider("claude", "Claude", 35)]);
@@ -291,6 +314,39 @@ describe("TrayPanel provider grid", () => {
     await waitFor(() => {
       expect(container.querySelector(".tray-panel-reveal--ready")).not.toBeNull();
     });
+  });
+
+  it("offers an Overview share snapshot using only included spend rows", async () => {
+    tauriMocks.getUsageSpendSummary.mockResolvedValue({
+      contract: {},
+      reportingDay: "2026-09-19",
+      dashboardTimezone: "UTC",
+      rows: [
+        {
+          providerId: "codex",
+          displayName: "Codex",
+          sevenDay: 1,
+          thirtyDay: 2,
+          currency: "USD",
+          source: "local",
+          includedInOverview: true,
+        },
+        {
+          providerId: "claude",
+          displayName: "Claude",
+          sevenDay: 3,
+          thirtyDay: 4,
+          currency: "USD",
+          source: "hidden",
+          includedInOverview: false,
+        },
+      ],
+    });
+
+    renderTrayPanel([provider("codex", "Codex", 35)]);
+
+    expect(await screen.findByRole("button", { name: "UsageSpendShare" })).toBeInTheDocument();
+    expect(screen.getByText(/1 of 1 OverviewSpendProviderCoverage/)).toBeInTheDocument();
   });
 
   it("dismisses the tray panel on unmodified Escape", async () => {
@@ -335,6 +391,29 @@ describe("TrayPanel provider grid", () => {
     await waitFor(() => {
       expect(tauriMocks.refreshProviders).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("scopes the status-page action to the selected provider", async () => {
+    const { container } = renderTrayPanel([
+      provider("claude", "Claude", 35),
+      provider("codex", "Codex", 45),
+    ]);
+
+    await waitFor(() => {
+      expect(container.querySelector(".tray-panel-reveal--ready")).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Claude$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Usage Dashboard$/ }));
+    expect(tauriMocks.openProviderDashboard).toHaveBeenLastCalledWith("claude");
+    fireEvent.click(await screen.findByRole("button", { name: /^Status Page$/ }));
+    expect(tauriMocks.openProviderStatusPage).toHaveBeenLastCalledWith("claude");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Codex$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Usage Dashboard$/ }));
+    expect(tauriMocks.openProviderDashboard).toHaveBeenLastCalledWith("codex");
+    fireEvent.click(await screen.findByRole("button", { name: /^Status Page$/ }));
+    expect(tauriMocks.openProviderStatusPage).toHaveBeenLastCalledWith("codex");
   });
 
   it("localizes static tray panel labels in Japanese", async () => {
@@ -520,6 +599,19 @@ describe("TrayPanel provider grid", () => {
     ).toEqual(["Codex", "Claude", "Cursor", "Factory", "Gemini"]);
   });
 
+  it("keeps compact Overview limited to two quota rows when explicitly selected", async () => {
+    const { container } = renderTrayPanel(
+      [providerWithThreeQuotaWindows("codex", "Codex")],
+      { overviewLayout: "compact" },
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".menu-stack__item")).not.toBeNull();
+    });
+
+    expect(container.querySelectorAll(".menu-metric")).toHaveLength(2);
+  });
+
   it("uses independent columns for a wide user-sized overview", async () => {
     tauriMocks.flyoutStoredSize.mockResolvedValue([700, 700]);
     const providers = [
@@ -699,6 +791,41 @@ describe("TrayPanel provider grid", () => {
     expect(grid?.classList.contains("provider-grid--no-icons")).toBe(true);
     expect(container.querySelector(".provider-icon")).toBeNull();
     expect(container.querySelector(".provider-grid__icon-overview")).toBeNull();
+  });
+
+  it("renders the default tray panel layout with no legacy window chrome", async () => {
+    // Pins the one dashboard layout: tray-variant surface, icon-first
+    // provider switcher, and the Zoom / Refresh / Settings... / About / Quit
+    // footer. The retired PopOut layout had a "CodexBar" title bar with
+    // window controls and a Settings / About / Quit footer without Zoom or
+    // Refresh.
+    const { container } = renderTrayPanel([
+      provider("claude", "Claude", 35),
+      provider("codex", "Codex", 20),
+    ]);
+
+    await waitFor(() => {
+      expect(container.querySelector(".menu-surface__footer-zoom")).not.toBeNull();
+    });
+
+    const surface = container.querySelector(".menu-surface");
+    expect(surface?.classList.contains("menu-surface--tray")).toBe(true);
+    expect(container.querySelector(".menu-surface--popout")).toBeNull();
+    expect(container.querySelector(".popout-titlebar")).toBeNull();
+    expect(container.querySelector(".popout-scale-shell")).toBeNull();
+    expect(container.querySelector(".provider-grid")).not.toBeNull();
+
+    const footerLabels = Array.from(
+      container.querySelectorAll(".menu-surface__footer > *"),
+    ).map((el) => el.textContent ?? "");
+    expect(footerLabels[0]).toContain("Zoom");
+    expect(footerLabels.slice(1).map((label) => label.replace(/Ctrl\+.*/, ""))).toEqual([
+      "↻Refresh",
+      "⚙Settings...",
+      "ⓘAbout CodexBar",
+      "⌧Quit",
+    ]);
+    expect(tauriMocks.setSurfaceMode).not.toHaveBeenCalled();
   });
 
   it("renders the tray footer zoom slider above Refresh and persists trayScalePercent after the debounce", async () => {

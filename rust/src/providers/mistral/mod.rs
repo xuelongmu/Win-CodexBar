@@ -9,14 +9,24 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+mod subscription;
+mod token_math;
+
+use subscription::{SubscriptionBudget, SubscriptionBudgets};
+
 use crate::core::{
-    CostSnapshot, FetchContext, Provider, ProviderError, ProviderFetchResult, ProviderId,
-    ProviderMetadata, RateWindow, SourceMode, UsageSnapshot,
+    CostSnapshot, FetchContext, NamedRateWindow, Provider, ProviderError, ProviderFetchResult,
+    ProviderId, ProviderMetadata, RateWindow, SourceMode, UsageSnapshot,
 };
 
 const BASE_URL: &str = "https://admin.mistral.ai";
 const COOKIE_DOMAINS: [&str; 3] = ["admin.mistral.ai", "mistral.ai", "auth.mistral.ai"];
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Optional subscription-page enrichment joins on a fast deadline so a slow
+/// `/subscription` render can never stall the refresh; degraded enrichment is
+/// logged and skipped, never fatal.
+const SUBSCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[derive(Debug, Deserialize)]
 struct BillingResponse {
@@ -99,6 +109,57 @@ pub struct MistralProvider {
     client: Client,
 }
 
+#[derive(Debug, Default)]
+struct TokenCounts {
+    input: i64,
+    output: i64,
+    cached: i64,
+}
+
+#[derive(Clone, Copy)]
+enum TokenKind {
+    Input,
+    Output,
+    Cached,
+}
+
+#[derive(Clone, Copy)]
+enum AggregationMode {
+    CostOnly,
+    CostAndTokens,
+}
+
+enum ModelAggregation {
+    Cost(f64),
+    CostAndTokens { tokens: TokenCounts, cost: f64 },
+}
+
+impl TokenCounts {
+    fn add_lane(&mut self, units: i64, kind: TokenKind) -> Result<(), ProviderError> {
+        let lane = match kind {
+            TokenKind::Input => &mut self.input,
+            TokenKind::Output => &mut self.output,
+            TokenKind::Cached => &mut self.cached,
+        };
+        *lane = lane.checked_add(units).ok_or_else(|| {
+            ProviderError::Parse("Mistral token count exceeds supported range".into())
+        })?;
+        Ok(())
+    }
+
+    fn add(&mut self, other: &Self) -> Result<(), ProviderError> {
+        self.add_lane(other.input, TokenKind::Input)?;
+        self.add_lane(other.output, TokenKind::Output)?;
+        self.add_lane(other.cached, TokenKind::Cached)
+    }
+
+    fn total(&self) -> Result<i64, ProviderError> {
+        token_math::checked_total(self.input, self.cached, self.output).ok_or_else(|| {
+            ProviderError::Parse("Mistral token count exceeds supported range".into())
+        })
+    }
+}
+
 impl MistralProvider {
     pub fn new() -> Self {
         Self {
@@ -113,9 +174,10 @@ impl MistralProvider {
                 is_primary: false,
                 dashboard_url: Some("https://admin.mistral.ai/organization/usage"),
                 status_page_url: Some("https://status.mistral.ai"),
+                tertiary_label_key: None,
             },
             client: crate::core::credentialed_http_client_builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(CLIENT_TIMEOUT)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
         }
@@ -170,26 +232,69 @@ impl MistralProvider {
         let billing: BillingResponse = serde_json::from_str(&body)
             .map_err(|e| ProviderError::Parse(format!("Failed to parse Mistral usage: {e}")))?;
 
-        let summary = Self::summarize_billing(billing);
-        Ok(Self::build_result(summary))
+        let summary = Self::summarize_billing(billing)?;
+        let budgets = match self.fetch_subscription_budgets(cookie_header).await {
+            Ok(budgets) => Some(budgets),
+            Err(error) => {
+                tracing::debug!(error = %error, "Mistral subscription allowance enrichment unavailable");
+                None
+            }
+        };
+        Ok(Self::build_result(summary, budgets))
     }
 
-    fn summarize_billing(billing: BillingResponse) -> MistralUsageSummary {
+    async fn fetch_subscription_budgets(
+        &self,
+        cookie_header: &str,
+    ) -> Result<SubscriptionBudgets, ProviderError> {
+        let response = self
+            .client
+            .get(format!("{BASE_URL}/subscription"))
+            .timeout(SUBSCRIPTION_TIMEOUT)
+            .header("Accept", "text/html")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Cookie", cookie_header)
+            .header("Referer", format!("{BASE_URL}/subscription"))
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(ProviderError::AuthRequired);
+        }
+        if !status.is_success() {
+            return Err(ProviderError::Other(format!(
+                "Mistral subscription API returned {status}"
+            )));
+        }
+        let final_url = response.url();
+        if final_url.scheme() != "https" || final_url.host_str() != Some("admin.mistral.ai") {
+            return Err(ProviderError::Parse(
+                "Mistral subscription response came from an unexpected host".into(),
+            ));
+        }
+        let body = response.text().await?;
+        subscription::parse(&body).map_err(ProviderError::Parse)
+    }
+
+    fn summarize_billing(billing: BillingResponse) -> Result<MistralUsageSummary, ProviderError> {
         let prices = Self::build_price_index(billing.prices.unwrap_or_default());
         let mut total_cost = 0.0;
-        let mut total_input_tokens = 0;
-        let mut total_output_tokens = 0;
-        let mut total_cached_tokens = 0;
+        let mut total_tokens = TokenCounts::default();
         let mut model_count = 0;
 
         if let Some(models) = billing.completion.and_then(|c| c.models) {
             model_count += models.len();
             for data in models.values() {
-                let (input, output, cached, cost) = Self::aggregate_model(data, &prices);
-                total_input_tokens += input;
-                total_output_tokens += output;
-                total_cached_tokens += cached;
-                total_cost += cost;
+                match Self::aggregate_model(data, &prices, AggregationMode::CostAndTokens)? {
+                    ModelAggregation::CostAndTokens { tokens, cost } => {
+                        total_tokens.add(&tokens)?;
+                        Self::accumulate_finite_cost(cost, &mut total_cost);
+                    }
+                    ModelAggregation::Cost(_) => {
+                        unreachable!("token mode returned cost-only result")
+                    }
+                }
             }
         }
 
@@ -199,7 +304,10 @@ impl MistralProvider {
         {
             if let Some(models) = category.models {
                 for data in models.values() {
-                    total_cost += Self::aggregate_model(data, &prices).3;
+                    Self::accumulate_finite_cost(
+                        Self::aggregate_cost(data, &prices)?,
+                        &mut total_cost,
+                    );
                 }
             }
         }
@@ -208,7 +316,10 @@ impl MistralProvider {
             for category in [libraries.pages, libraries.tokens].into_iter().flatten() {
                 if let Some(models) = category.models {
                     for data in models.values() {
-                        total_cost += Self::aggregate_model(data, &prices).3;
+                        Self::accumulate_finite_cost(
+                            Self::aggregate_cost(data, &prices)?,
+                            &mut total_cost,
+                        );
                     }
                 }
             }
@@ -220,26 +331,34 @@ impl MistralProvider {
                 .flatten()
             {
                 for data in models.values() {
-                    total_cost += Self::aggregate_model(data, &prices).3;
+                    Self::accumulate_finite_cost(
+                        Self::aggregate_cost(data, &prices)?,
+                        &mut total_cost,
+                    );
                 }
             }
         }
 
         let _ = billing.start_date;
 
-        MistralUsageSummary {
+        total_tokens.total()?;
+
+        Ok(MistralUsageSummary {
             total_cost,
             currency: billing.currency.unwrap_or_else(|| "EUR".to_string()),
             currency_symbol: billing.currency_symbol.unwrap_or_else(|| "€".to_string()),
-            total_input_tokens,
-            total_output_tokens,
-            total_cached_tokens,
+            total_input_tokens: total_tokens.input,
+            total_output_tokens: total_tokens.output,
+            total_cached_tokens: total_tokens.cached,
             model_count,
             end_date: billing.end_date.as_deref().and_then(Self::parse_date),
-        }
+        })
     }
 
-    fn build_result(summary: MistralUsageSummary) -> ProviderFetchResult {
+    fn build_result(
+        summary: MistralUsageSummary,
+        budgets: Option<SubscriptionBudgets>,
+    ) -> ProviderFetchResult {
         let reset_date = summary.end_date.map(|dt| dt + chrono::Duration::seconds(1));
         let cost_description = if summary.total_cost > 0.0 {
             format!(
@@ -272,7 +391,37 @@ impl MistralProvider {
             token_detail
         ));
 
+        if let Some(budgets) = budgets {
+            if let Some(api) = budgets.api {
+                usage.primary = Self::budget_window(&api);
+                usage.primary_label = Some("Included API".to_string());
+            }
+            if let Some(vibe) = budgets.vibe {
+                usage.extra_rate_windows.push(NamedRateWindow::new(
+                    "mistral-monthly-plan",
+                    "Monthly Plan",
+                    Self::budget_window(&vibe),
+                ));
+            }
+        }
+
         ProviderFetchResult::new(usage, "web").with_cost(cost)
+    }
+
+    fn budget_window(budget: &SubscriptionBudget) -> RateWindow {
+        let used = budget.used_amount();
+        let remaining = budget.remaining_amount();
+        let description = format!(
+            "{used:.2} {currency} / {limit:.2} {currency} · {remaining:.2} {currency} remaining",
+            currency = budget.currency,
+            limit = budget.limit,
+        );
+        RateWindow::with_details(
+            budget.used_percent,
+            None,
+            budget.resets_at,
+            Some(description),
+        )
     }
 
     fn build_price_index(prices: Vec<MistralPrice>) -> HashMap<String, f64> {
@@ -293,36 +442,52 @@ impl MistralProvider {
     fn aggregate_model(
         data: &ModelUsageData,
         prices: &HashMap<String, f64>,
-    ) -> (i64, i64, i64, f64) {
-        let (input, input_cost) = Self::aggregate_entries(data.input.as_deref(), prices);
-        let (output, output_cost) = Self::aggregate_entries(data.output.as_deref(), prices);
-        let (cached, cached_cost) = Self::aggregate_entries(data.cached.as_deref(), prices);
-        (
-            input,
-            output,
-            cached,
-            input_cost + output_cost + cached_cost,
-        )
-    }
-
-    fn aggregate_entries(
-        entries: Option<&[UsageEntry]>,
-        prices: &HashMap<String, f64>,
-    ) -> (i64, f64) {
-        let mut tokens = 0;
+        mode: AggregationMode,
+    ) -> Result<ModelAggregation, ProviderError> {
+        let mut tokens = TokenCounts::default();
         let mut cost = 0.0;
-        for entry in entries.unwrap_or_default() {
-            let paid = entry.value_paid.or(entry.value).unwrap_or(0);
-            tokens += paid;
-            if let (Some(metric), Some(group)) = (&entry.billing_metric, &entry.billing_group) {
-                let entry_cost =
-                    (paid as f64) * prices.get(&format!("{metric}::{group}")).unwrap_or(&0.0);
-                if entry_cost.is_finite() {
-                    cost += entry_cost;
+        for (kind, entries) in [
+            (TokenKind::Input, data.input.as_deref()),
+            (TokenKind::Output, data.output.as_deref()),
+            (TokenKind::Cached, data.cached.as_deref()),
+        ] {
+            for entry in entries.unwrap_or_default() {
+                let units = entry.value_paid.or(entry.value).unwrap_or(0);
+                if matches!(mode, AggregationMode::CostAndTokens) {
+                    tokens.add_lane(units, kind)?;
+                }
+                if let (Some(metric), Some(group)) = (&entry.billing_metric, &entry.billing_group) {
+                    let entry_cost =
+                        (units as f64) * prices.get(&format!("{metric}::{group}")).unwrap_or(&0.0);
+                    Self::accumulate_finite_cost(entry_cost, &mut cost);
                 }
             }
         }
-        (tokens, cost)
+        Ok(match mode {
+            AggregationMode::CostOnly => ModelAggregation::Cost(cost),
+            AggregationMode::CostAndTokens => ModelAggregation::CostAndTokens { tokens, cost },
+        })
+    }
+
+    fn aggregate_cost(
+        data: &ModelUsageData,
+        prices: &HashMap<String, f64>,
+    ) -> Result<f64, ProviderError> {
+        match Self::aggregate_model(data, prices, AggregationMode::CostOnly)? {
+            ModelAggregation::Cost(cost) => Ok(cost),
+            ModelAggregation::CostAndTokens { .. } => {
+                unreachable!("cost mode returned token-bearing result")
+            }
+        }
+    }
+
+    fn accumulate_finite_cost(cost: f64, total: &mut f64) {
+        if cost.is_finite() {
+            let updated = *total + cost;
+            if updated.is_finite() {
+                *total = updated;
+            }
+        }
     }
 
     fn parse_date(value: &str) -> Option<DateTime<Utc>> {
@@ -416,11 +581,11 @@ mod tests {
         }))
         .unwrap();
 
-        let summary = MistralProvider::summarize_billing(billing);
+        let summary = MistralProvider::summarize_billing(billing).unwrap();
         assert!((summary.total_cost - 0.005).abs() < 0.000001);
         assert_eq!(summary.model_count, 1);
 
-        let result = MistralProvider::build_result(summary);
+        let result = MistralProvider::build_result(summary, None);
         assert_eq!(
             result.cost.as_ref().map(|c| c.currency_code.as_str()),
             Some("EUR")
@@ -434,6 +599,46 @@ mod tests {
                 .unwrap_or_default()
                 .contains("1000 input / 500 output")
         );
+    }
+
+    #[test]
+    fn attaches_subscription_allowances_without_replacing_billing_cost() {
+        let summary = MistralUsageSummary {
+            total_cost: 12.5,
+            currency: "EUR".to_string(),
+            currency_symbol: "€".to_string(),
+            total_input_tokens: 100,
+            total_output_tokens: 50,
+            total_cached_tokens: 0,
+            model_count: 1,
+            end_date: None,
+        };
+        let result = MistralProvider::build_result(
+            summary,
+            Some(SubscriptionBudgets {
+                api: Some(SubscriptionBudget {
+                    used_percent: 25.0,
+                    limit: 100.0,
+                    currency: "USD".to_string(),
+                    resets_at: None,
+                }),
+                vibe: Some(SubscriptionBudget {
+                    used_percent: 50.0,
+                    limit: 20.0,
+                    currency: "EUR".to_string(),
+                    resets_at: None,
+                }),
+            }),
+        );
+
+        assert_eq!(result.usage.primary.used_percent, 25.0);
+        assert_eq!(result.usage.primary_label.as_deref(), Some("Included API"));
+        assert_eq!(result.usage.extra_rate_windows.len(), 1);
+        assert_eq!(
+            result.usage.extra_rate_windows[0].id,
+            "mistral-monthly-plan"
+        );
+        assert_eq!(result.cost.as_ref().map(|cost| cost.used), Some(12.5));
     }
 
     #[test]
@@ -462,8 +667,48 @@ mod tests {
         }))
         .unwrap();
 
-        let summary = MistralProvider::summarize_billing(billing);
+        let summary = MistralProvider::summarize_billing(billing).unwrap();
 
         assert_eq!(summary.total_cost, 0.0);
+    }
+
+    #[test]
+    fn preserves_signed_lanes_when_the_checked_total_cancels() {
+        let billing: BillingResponse = serde_json::from_value(serde_json::json!({
+            "completion": {
+                "models": {
+                    "fixture": {
+                        "input": [{"value": i64::MAX}],
+                        "cached": [{"value": -1}],
+                        "output": [{"value": 1}]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let summary = MistralProvider::summarize_billing(billing).unwrap();
+        assert_eq!(summary.total_input_tokens, i64::MAX);
+        assert_eq!(summary.total_cached_tokens, -1);
+        assert_eq!(summary.total_output_tokens, 1);
+    }
+
+    #[test]
+    fn rejects_same_lane_token_overflow_during_aggregation() {
+        let billing: BillingResponse = serde_json::from_value(serde_json::json!({
+            "completion": {
+                "models": {
+                    "fixture": {
+                        "input": [{"value": i64::MAX}, {"value": 1}]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            MistralProvider::summarize_billing(billing),
+            Err(ProviderError::Parse(message)) if message.contains("token count")
+        ));
     }
 }

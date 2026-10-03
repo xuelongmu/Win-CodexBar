@@ -11,7 +11,7 @@ pub async fn get_spend_contract(
     include_open_codex: Option<bool>,
 ) -> Result<SpendContract, String> {
     let provider = provider_id.trim().to_ascii_lowercase();
-    if !matches!(provider.as_str(), "codex" | "claude" | "opencodego") {
+    if !matches!(provider.as_str(), "codex" | "claude" | "pi" | "opencodego") {
         return Err(format!(
             "Spend contract is unavailable for provider: {provider}"
         ));
@@ -24,6 +24,7 @@ pub async fn get_spend_contract(
         let summary = match provider.as_str() {
             "codex" => scanner.scan_codex(),
             "claude" => scanner.scan_claude(),
+            "pi" => scanner.scan_pi(),
             "opencodego" => scanner.scan_opencodego_with_cancel(None),
             _ => unreachable!(),
         };
@@ -33,6 +34,7 @@ pub async fn get_spend_contract(
             history_days,
             include_import,
             settings.hide_native_codex_cost_when_open_codex_present && provider == "codex",
+            settings.hide_personal_info,
             summary,
         )
     })

@@ -17,6 +17,14 @@ use std::path::PathBuf;
 
 use crate::core::ProviderId;
 
+/// Stable namespace used by the desktop bridge for quota metric rows.
+pub const USAGE_ITEM_METRIC_PREFIX: &str = "metric:";
+pub const CODEX_SPARK_USAGE_ITEM_IDS: [&str; 2] = [
+    "metric:extra-codex-spark",
+    "metric:extra-codex-spark-weekly",
+];
+pub const CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID: &str = "metric:extra-claude-routines";
+
 mod api_keys;
 mod manual_cookies;
 mod provider_workspace;
@@ -164,6 +172,10 @@ pub struct Settings {
     /// Menu bar display mode: "minimal", "compact", or "detailed"
     pub menu_bar_display_mode: String,
 
+    /// Overview card layout: "detailed" or "compact".
+    #[serde(default = "default_overview_layout")]
+    pub overview_layout: String,
+
     /// Show all token accounts in provider menus instead of collapsing behind switchers
     #[serde(default)]
     pub show_all_token_accounts_in_menu: bool,
@@ -258,6 +270,11 @@ pub struct Settings {
     #[serde(default = "default_tray_scale_percent")]
     pub tray_scale_percent: u16,
 
+    /// Keep the tray flyout above other windows after it loses focus.
+    /// Disabled by default so the flyout retains normal z-order behavior.
+    #[serde(default)]
+    pub tray_panel_always_on_top: bool,
+
     /// Enable the local PowerToys Command Palette status pipe.
     #[serde(default)]
     pub powertoys_status_pipe_enabled: bool,
@@ -333,11 +350,11 @@ pub struct Settings {
     #[serde(default = "default_alibaba_token_plan_region")]
     pub alibaba_token_plan_region: String,
 
-    /// Opt-in: allow Codex usage reads from external (non-CLI-owned) OAuth
-    /// credential sources. Default OFF — when disabled, stale external OAuth
-    /// credential files fail closed instead of being used silently (upstream
-    /// 0.50.1 #2944). The CLI-owned `auth.json` is always read read-only; this
-    /// gate only controls whether stale external OAuth tokens are trusted.
+    /// Opt-in: allow read-only Codex usage reads from the CLI-owned OAuth
+    /// credential source. Win-CodexBar never refreshes or writes `auth.json`.
+    /// Default OFF — when disabled, the source must contain refresh
+    /// provenance; JWT expiry is checked when available (upstream 0.50.1
+    /// #2944).
     #[serde(default)]
     pub codex_external_oauth_sources_allowed: bool,
 
@@ -483,6 +500,23 @@ fn default_api_region(id: ProviderId) -> &'static str {
 const DEFAULT_CODEX_OPENAI_WEB_EXTRAS: bool = true;
 const DEFAULT_CODEX_SPARK_USAGE_VISIBLE: bool = true;
 
+fn normalize_hidden_usage_item_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && !id.chars().any(char::is_control)
+                && id.starts_with(USAGE_ITEM_METRIC_PREFIX)
+        })
+        .filter(|id| seen.insert(id.clone()))
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let mut enabled = HashSet::new();
@@ -517,6 +551,7 @@ impl Default for Settings {
             predictive_pace_warning_enabled: false,
             show_pace: true,
             menu_bar_display_mode: "detailed".to_string(), // Detailed mode by default
+            overview_layout: default_overview_layout(),
             show_all_token_accounts_in_menu: false,
             provider_configs: HashMap::new(),
             disable_keychain_access: false,
@@ -539,6 +574,7 @@ impl Default for Settings {
             theme: ThemePreference::default(), // Auto (follows prefers-color-scheme)
             window_scale_percent: default_window_scale_percent(),
             tray_scale_percent: default_tray_scale_percent(),
+            tray_panel_always_on_top: false,
             powertoys_status_pipe_enabled: false,
             float_bar_enabled: false,
             float_bar_opacity: default_float_bar_opacity(),
@@ -560,6 +596,18 @@ impl Default for Settings {
             open_codex_usage_logs_enabled: false,
             hide_native_codex_cost_when_open_codex_present: false,
         }
+    }
+}
+
+fn default_overview_layout() -> String {
+    "compact".to_string()
+}
+
+pub fn normalize_overview_layout(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "compact" => "compact".to_string(),
+        "detailed" => "detailed".to_string(),
+        _ => default_overview_layout(),
     }
 }
 
@@ -592,7 +640,38 @@ impl Settings {
             settings.apply_promote_tray_default_migration();
         }
 
+        // One-shot migration: materialize the persisted hidden usage-item list
+        // from the pre-0.62 per-provider visibility flags. After this the list
+        // is the sole source of truth and the flags stay untouched.
+        settings.migrate_legacy_usage_item_flags();
+
         settings
+    }
+
+    /// Materialize `hidden_usage_item_ids` from the pre-0.62 per-provider
+    /// visibility flags where the list was never persisted. Idempotent: a
+    /// provider with an explicit list is left alone.
+    fn migrate_legacy_usage_item_flags(&mut self) {
+        if self
+            .provider_config(ProviderId::Codex)
+            .and_then(|config| config.hidden_usage_item_ids.as_ref())
+            .is_none()
+            && !self.spark_usage_visible(ProviderId::Codex)
+        {
+            self.toggle_hidden_items(ProviderId::Codex, &CODEX_SPARK_USAGE_ITEM_IDS, false);
+        }
+        if self
+            .provider_config(ProviderId::Claude)
+            .and_then(|config| config.hidden_usage_item_ids.as_ref())
+            .is_none()
+            && !self.claude_daily_routines_usage_visible
+        {
+            self.toggle_hidden_items(
+                ProviderId::Claude,
+                &[CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID],
+                false,
+            );
+        }
     }
 
     /// Marker written after the one-shot "pin tray by default" migration (issue #237).
@@ -948,6 +1027,39 @@ impl Settings {
         self.provider_config_mut(id).workspace_id = Some(value.into());
     }
 
+    /// Optional user-entered allowance for Copilot seat AI credits.
+    ///
+    /// GitHub reports the absolute `credits_used` counter but does not expose
+    /// a documented included-credit ceiling, so callers must keep an absent
+    /// or non-positive value as unknown rather than inventing a denominator.
+    ///
+    /// This setter is the single owner of the positive-finite invariant:
+    /// invalid values are rejected instead of silently dropped, while the
+    /// getter keeps defensively filtering values persisted by older builds.
+    pub fn seat_credit_entitlement(&self, id: ProviderId) -> Option<f64> {
+        self.provider_configs
+            .get(&id)
+            .and_then(|config| config.seat_credit_entitlement)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    pub fn set_seat_credit_entitlement(
+        &mut self,
+        id: ProviderId,
+        value: Option<f64>,
+    ) -> Result<(), String> {
+        if let Some(value) = value
+            && (!value.is_finite() || value <= 0.0)
+        {
+            return Err(
+                "Copilot seat AI-credit allowance must be a finite number greater than zero"
+                    .to_string(),
+            );
+        }
+        self.provider_config_mut(id).seat_credit_entitlement = value;
+        Ok(())
+    }
+
     /// Wayfinder gateway URL, defaulting to the local loopback gateway.
     pub fn gateway_url(&self, id: ProviderId) -> &str {
         self.provider_configs
@@ -1002,6 +1114,42 @@ impl Settings {
         self.provider_config_mut(id).spark_usage_visible = Some(value);
     }
 
+    /// Return the persisted hidden usage-item IDs for `id`.
+    pub fn hidden_usage_item_ids(&self, id: ProviderId) -> Vec<String> {
+        self.provider_configs
+            .get(&id)
+            .and_then(|config| config.hidden_usage_item_ids.as_ref())
+            .map_or_else(Vec::new, |ids| normalize_hidden_usage_item_ids(ids.clone()))
+    }
+
+    /// Persist an explicit presentation-only usage-item visibility list.
+    pub fn set_hidden_usage_item_ids(&mut self, id: ProviderId, ids: Vec<String>) {
+        let hidden = normalize_hidden_usage_item_ids(ids);
+        self.provider_config_mut(id).hidden_usage_item_ids = Some(hidden);
+    }
+
+    /// Add or remove `items` from the provider's hidden usage-item list.
+    ///
+    /// `visible = false` hides the items; `visible = true` un-hides them. This
+    /// is the single write path for usage-item visibility; it only touches the
+    /// presentation list and never the legacy per-provider boolean flags.
+    pub fn toggle_hidden_items(&mut self, id: ProviderId, items: &[&str], visible: bool) {
+        let mut hidden = self.hidden_usage_item_ids(id);
+        if visible {
+            hidden.retain(|item| !items.contains(&item.as_str()));
+        } else {
+            hidden.extend(items.iter().map(|item| (*item).to_string()));
+        }
+        self.set_hidden_usage_item_ids(id, hidden);
+    }
+
+    /// Update the old Claude Daily Routines flag without touching the
+    /// usage-item list; the flag is presentation-only and kept for callers
+    /// that still read the boolean directly.
+    pub fn set_claude_daily_routines_usage_visible(&mut self, value: bool) {
+        self.claude_daily_routines_usage_visible = value;
+    }
+
     /// Per-provider historical-tracking toggle (currently codex-only).
     pub fn historical_tracking(&self, id: ProviderId) -> bool {
         self.provider_configs
@@ -1024,6 +1172,19 @@ impl Settings {
 
     pub fn set_avoid_keychain_prompts(&mut self, id: ProviderId, value: bool) {
         self.provider_config_mut(id).avoid_keychain_prompts = value;
+    }
+
+    /// Whether the desktop shell may reopen a captured CLI session after its
+    /// provider quota becomes available again. This is intentionally opt-in.
+    pub fn auto_resume_after_quota_reset(&self, id: ProviderId) -> bool {
+        self.provider_configs
+            .get(&id)
+            .map(|config| config.auto_resume_after_quota_reset)
+            .unwrap_or(false)
+    }
+
+    pub fn set_auto_resume_after_quota_reset(&mut self, id: ProviderId, value: bool) {
+        self.provider_config_mut(id).auto_resume_after_quota_reset = value;
     }
 
     // ── Legacy field-name aliases ────────────────────────────────────
@@ -1211,6 +1372,38 @@ impl Settings {
     }
     pub fn set_claude_avoid_keychain_prompts(&mut self, v: bool) {
         self.set_avoid_keychain_prompts(ProviderId::Claude, v)
+    }
+
+    /// Claude-only: whether the external claude-swap (`cswap`) adapter is
+    /// enabled. Disabled by default.
+    pub fn claude_swap_enabled(&self) -> bool {
+        self.provider_configs
+            .get(&ProviderId::Claude)
+            .map(|config| config.claude_swap_enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn set_claude_swap_enabled(&mut self, value: bool) {
+        self.provider_config_mut(ProviderId::Claude)
+            .claude_swap_enabled = value;
+    }
+
+    /// Claude-only: configured claude-swap executable path, or `""` when unset.
+    pub fn claude_swap_executable_path(&self) -> &str {
+        self.provider_configs
+            .get(&ProviderId::Claude)
+            .and_then(|config| config.claude_swap_executable_path.as_deref())
+            .unwrap_or("")
+    }
+
+    pub fn set_claude_swap_executable_path(&mut self, value: impl Into<String>) {
+        let trimmed = value.into().trim().to_string();
+        let config = self.provider_config_mut(ProviderId::Claude);
+        config.claude_swap_executable_path = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     }
 
     // ── Per-provider accent color override (#2972) ──────────────────

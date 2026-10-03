@@ -32,17 +32,31 @@ function Invoke-Step {
     }
 }
 
+function Invoke-WorktreeStorageAudit {
+    $auditScript = Join-Path $PSScriptRoot "worktree-storage.ps1"
+    Write-Host ""
+    Write-Host "==> Worktree storage audit (read-only)" -ForegroundColor Cyan
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $auditScript -RepoRoot $RepoRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Worktree storage audit could not complete; continuing with the requested local checks."
+    }
+}
+
 # Hosted pr-check slice (-Slice ci): mirrors .github/workflows/pr-check.yml
 # step for step (workspace-wide fmt/clippy/test, frozen frontend install,
-# frontend test/build, interaction-guard script tests). The guard's script
-# tests are pure Node, so the mirror stays honest locally too.
+# frontend lint/rule tests/build, interaction-guard script tests). The guard's
+# script tests are pure Node, so the mirror stays honest locally too.
 if ($Slice -eq 'ci') {
     Push-Location $RepoRoot
     try {
+        Invoke-Step "CircleCI helper tests" "powershell.exe" @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "scripts\circleci-pr.tests.ps1")
         Invoke-Step "Rust format check" "cargo" @("fmt", "--all", "--check")
         Invoke-Step "Rust clippy (workspace)" "cargo" @("clippy", "--workspace", "--all-targets", "--", "-D", "warnings")
         Invoke-Step "Rust tests (workspace)" "cargo" @("test", "--workspace")
         Invoke-Step "Frontend install" "pnpm" @("--dir", "apps\desktop-tauri", "install", "--frozen-lockfile")
+        Invoke-Step "Frontend Oxlint" "pnpm" @("--dir", "apps\desktop-tauri", "run", "lint")
+        Invoke-Step "Anti-slop tooling type check" "pnpm" @("--dir", "apps\desktop-tauri", "run", "check:anti-slop")
+        Invoke-Step "Anti-slop rule tests" "pnpm" @("--dir", "apps\desktop-tauri", "run", "test:anti-slop")
         Invoke-Step "Frontend tests" "pnpm" @("--dir", "apps\desktop-tauri", "test")
         Invoke-Step "Frontend type check / build" "pnpm" @("--dir", "apps\desktop-tauri", "run", "build")
         Invoke-Step "Interaction guard script tests" "node" @("--test", ".github/scripts/interaction-guard.test.mjs")
@@ -62,6 +76,8 @@ if (-not ($Rust -or $Tauri -or $Frontend -or $Format -or $Clippy -or $ReleaseDoc
 
 Push-Location $RepoRoot
 try {
+    . (Join-Path $PSScriptRoot "worktree-env.ps1") -RepoRoot $RepoRoot
+    Invoke-WorktreeStorageAudit
     Invoke-Step "GitHub write-safety tests" "bash" @("scripts/gh-safe.tests.sh")
     if ($All -or $Format) {
         Invoke-Step "Rust format" "cargo" @("fmt", "--all", "--check")

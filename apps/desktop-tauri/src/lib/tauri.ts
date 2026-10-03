@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ClaudeAccount,
+  ClaudeReconciliationSnapshot,
+  GrokAccount,
+  GrokAccountUsage,
+  ClaudeSwapAccountsState,
   ApiKeyInfoBridge,
   ApiKeyProviderInfoBridge,
   AppInfoBridge,
@@ -44,11 +48,28 @@ import type {
 } from "../types/bridge";
 
 export const claudeAccountsList = () => invoke<ClaudeAccount[]>("claude_accounts_list");
+export const claudeReconciliationState = () =>
+  invoke<ClaudeReconciliationSnapshot | null>("claude_reconciliation_state");
 export const claudeAccountAdd = () => invoke<void>("claude_account_add");
 export const claudeAccountCancelLogin = () => invoke<void>("claude_account_cancel_login");
 export const claudeAccountSaveCurrent = () => invoke<void>("claude_account_save_current");
 export const claudeAccountRemove = (id: string) => invoke<void>("claude_account_remove", { id });
-export const claudeAccountSwitch = (id: string) => invoke<void>("claude_account_switch", { id });
+export const claudeAccountSwitch = (id: string) =>
+  invoke<ClaudeReconciliationSnapshot>("claude_account_switch", { id });
+export const grokAccountsList = () => invoke<GrokAccount[]>("grok_accounts_list");
+export const grokAccountAdd = () => invoke<void>("grok_account_add");
+export const grokAccountCancelLogin = () => invoke<void>("grok_account_cancel_login");
+export const grokAccountSaveCurrent = () => invoke<void>("grok_account_save_current");
+export const grokAccountRemove = (id: string) => invoke<void>("grok_account_remove", { id });
+export const grokAccountSwitch = (id: string) => invoke<void>("grok_account_switch", { id });
+export const grokAccountFetch = (id: string) =>
+  invoke<GrokAccountUsage>("grok_account_fetch", { id });
+export const claudeSwapAccountsList = () =>
+  invoke<ClaudeSwapAccountsState>("claude_swap_accounts_list");
+export const claudeSwapAccountSwitch = (slot: number) =>
+  invoke<ClaudeReconciliationSnapshot>("claude_swap_account_switch", { slot });
+export const claudeSwapAccountReauthenticate = (slot: number) =>
+  invoke<ClaudeReconciliationSnapshot>("claude_swap_account_reauthenticate", { slot });
 
 export function getBootstrapState(): Promise<BootstrapState> {
   return invoke<BootstrapState>("get_bootstrap_state");
@@ -393,6 +414,16 @@ export function setProviderUsageSource(providerId: string, source: string): Prom
   return invoke<void>("set_provider_usage_source", { providerId, source });
 }
 
+export function setProviderAutoResumeAfterQuotaReset(
+  providerId: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_provider_auto_resume_after_quota_reset", {
+    providerId,
+    enabled,
+  });
+}
+
 export function setProviderCookieSource(providerId: string, source: string): Promise<void> {
   return invoke<void>("set_provider_cookie_source", { providerId, source });
 }
@@ -417,6 +448,17 @@ export function setProviderGatewayUrl(
   gatewayUrl: string,
 ): Promise<void> {
   return invoke<void>("set_provider_gateway_url", { providerId, gatewayUrl });
+}
+
+export function getProviderAzureApiVersion(providerId: string): Promise<string | null> {
+  return invoke<string | null>("get_provider_azure_api_version", { providerId });
+}
+
+export function setProviderAzureApiVersion(
+  providerId: string,
+  apiVersion: string,
+): Promise<void> {
+  return invoke<void>("set_provider_azure_api_version", { providerId, apiVersion });
 }
 
 // ── Phase 6d — credential detection ──────────────────────────────────
@@ -497,6 +539,10 @@ export function codexAccountsList(): Promise<CodexAccount[]> {
 
 export function codexAccountAdd(): Promise<CodexAccount> {
   return invoke<CodexAccount>("codex_account_add");
+}
+
+export function codexAccountReauthenticate(): Promise<CodexAccount> {
+  return invoke<CodexAccount>("codex_account_reauthenticate");
 }
 
 export function codexAccountRemove(id: string): Promise<void> {

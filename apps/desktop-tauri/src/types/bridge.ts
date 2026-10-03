@@ -69,6 +69,7 @@ export type UpdateChannel = "stable" | "beta";
 export type ThemePreference = "auto" | "light" | "dark";
 
 export type MenuBarDisplayMode = "minimal" | "compact" | "detailed";
+export type OverviewLayout = "detailed" | "compact";
 
 /** How cost is rendered on provider MenuCards (#2976). */
 export type CostSummaryDisplayStyle = "compact" | "detailed" | "hidden";
@@ -198,6 +199,7 @@ export interface SettingsSnapshot {
   resetTimeRelative: boolean;
   showResetWhenExhausted: boolean;
   menuBarDisplayMode: MenuBarDisplayMode;
+  overviewLayout: OverviewLayout;
   hidePersonalInfo: boolean;
   updateChannel: UpdateChannel;
   autoDownloadUpdates: boolean;
@@ -220,8 +222,14 @@ export interface SettingsSnapshot {
   windowScalePercent: number;
   /** 100..=200 — clamped server-side. */
   trayScalePercent: number;
+  /** Keep the tray panel above other windows after it loses focus. */
+  trayPanelAlwaysOnTop: boolean;
   powertoysStatusPipeEnabled: boolean;
   claudeAvoidKeychainPrompts: boolean;
+  /** Opt-in external claude-swap (`cswap`) account import (Claude only). */
+  claudeSwapEnabled?: boolean;
+  /** Path to the cswap executable (Claude only, empty when unset). */
+  claudeSwapExecutablePath?: string;
   codexSparkUsageVisible: boolean;
   disableKeychainAccess: boolean;
   wayfinderGatewayUrl?: string;
@@ -255,6 +263,11 @@ export interface SettingsSnapshot {
   claudeAllowReadingClaudeCodeCredentials: boolean;
   /** Alibaba Token Plan region: cn | intl | cn-personal | intl-personal. */
   alibabaTokenPlanRegion: string;
+  /**
+   * Optional user-entered Copilot seat AI-credit allowance.
+   * Snapshot-side null and absent are equivalent.
+   */
+  copilotSeatCreditEntitlement?: number | null;
   /** Optional work-week length [2,6] for session-equivalent weekly forecast. */
   weeklyProgressWorkDays?: number | null;
   /** How cost is rendered on provider cards (#2976). */
@@ -295,6 +308,7 @@ export interface SettingsUpdate {
   resetTimeRelative?: boolean;
   showResetWhenExhausted?: boolean;
   menuBarDisplayMode?: MenuBarDisplayMode;
+  overviewLayout?: OverviewLayout;
   hidePersonalInfo?: boolean;
   updateChannel?: UpdateChannel;
   autoDownloadUpdates?: boolean;
@@ -312,13 +326,21 @@ export interface SettingsUpdate {
   theme?: ThemePreference;
   windowScalePercent?: number;
   trayScalePercent?: number;
+  trayPanelAlwaysOnTop?: boolean;
   powertoysStatusPipeEnabled?: boolean;
   claudeAvoidKeychainPrompts?: boolean;
   claudeAllowReadingClaudeCodeCredentials?: boolean;
+  claudeSwapEnabled?: boolean;
+  claudeSwapExecutablePath?: string;
   codexSparkUsageVisible?: boolean;
   disableKeychainAccess?: boolean;
   /** Map of provider CLI name → metric preference label. */
   providerMetrics?: Record<string, MetricPreference>;
+  /**
+   * Map of provider CLI name → full hidden usage-item ID list. Replaces the
+   * whole list for that provider; empty clears all hidden rows.
+   */
+  providerHiddenUsageItemIds?: Record<string, string[]>;
   floatBarEnabled?: boolean;
   floatBarOpacity?: number;
   floatBarScale?: number;
@@ -332,6 +354,8 @@ export interface SettingsUpdate {
   promoteTrayIcon?: boolean;
   claudeDailyRoutinesUsageVisible?: boolean;
   alibabaTokenPlanRegion?: string;
+  /** Optional user-entered Copilot seat AI-credit allowance; null clears it. */
+  copilotSeatCreditEntitlement?: number | null;
   weeklyProgressWorkDays?: number | null;
   costSummaryDisplayStyle?: CostSummaryDisplayStyle;
   openCodexUsageLogsEnabled?: boolean;
@@ -359,7 +383,7 @@ export interface UsageSpendRow {
   thirtyDayTokens?: number | null;
   currency: string;
   source: string;
-  includedInOverview?: boolean;
+  includedInOverview: boolean;
   daily?: UsageSpendDailyPoint[];
   /** F8: true when served from stale cache while a re-scan is in progress. */
   refreshing?: boolean;
@@ -370,6 +394,8 @@ export interface UsageSpendRow {
 export interface UsageSpendSummary {
   rows: UsageSpendRow[];
   contract: SpendContract;
+  reportingDay: string;
+  dashboardTimezone: string;
 }
 
 export type CostProvenance = "listPriceEstimate" | "vendorMetered" | "mixed" | "unknown";
@@ -549,8 +575,14 @@ export interface CostSnapshotBridge {
   formattedUsed: string;
   formattedLimit: string | null;
   balance?: number | null;
+  /** Successful balance observation time; independent from the usage-cap age. */
+  balanceUpdatedAt?: string | null;
+  /** Stable provider account scope for reconciling paired observations. */
+  accountId?: string | null;
   formattedBalance?: string | null;
   daily?: CostDailyPoint[];
+  /** Provider-metered spend that is itself a primary usage signal. */
+  alwaysVisible?: boolean;
 }
 
 export interface PaceSnapshot {
@@ -571,6 +603,39 @@ export interface SessionEquivalentForecastSnapshot {
   weeklyUsedPercent: number;
 }
 
+export interface SubscriptionMetadataSnapshot {
+  startsAt: string | null;
+  expiresAt: string | null;
+  renewsAt: string | null;
+}
+
+export interface ProviderInventoryItem {
+  id: string;
+  title: string;
+  availableCount: number;
+  nextExpiresAt: string | null;
+}
+
+export interface ProviderDisplayProgress {
+  used: number;
+  total: number;
+}
+
+/** Transient provider detail row; it is display-only and never quota math. */
+export interface ProviderDisplayDetail {
+  id: string;
+  title: string;
+  value: string;
+  secondaryValue: string | null;
+  progress: ProviderDisplayProgress | null;
+}
+
+/** One metric or provider-emitted extra row available to visibility controls. */
+export interface ProviderUsageItem {
+  id: string;
+  title: string;
+  available: boolean;
+}
 /** Backend-classified provider availability state (camelCase serde on the bridge). */
 export type ProviderStateKind =
   | "ready"
@@ -596,11 +661,22 @@ export interface ProviderUsageSnapshot {
     id: string;
     title: string;
     window: RateWindowSnapshot;
+    /** Provider-declared fallback lane; only fills in without a core quota window. */
+    fallbackLane?: boolean;
   }>;
+  /** Display-only discrete provider inventory; never used as quota math. */
+  inventory?: ProviderInventoryItem[];
+  /** Provider-specific display rows; never used as quota math or persistence. */
+  displayDetails?: ProviderDisplayDetail[];
+  /** Presentation-only hidden metric/extra row IDs. */
+  hiddenUsageItemIds?: string[];
   cost: CostSnapshotBridge | null;
   planName: string | null;
   accountEmail: string | null;
+  subscription?: SubscriptionMetadataSnapshot | null;
   sourceLabel: string;
+  /** Backend proof of a live successful Claude CLI quota fetch; only true is proof. */
+  hasSuccessfulClaudeCliQuota?: boolean;
   updatedAt: string;
   error: string | null;
   errorState: ProviderStateKind;
@@ -721,7 +797,7 @@ export interface AppInfoBridge {
 
 export interface DailyCostPoint {
   date: string;
-  value: number;
+  value: number | null;
 }
 
 /** Exact local token totals per day (upstream 0.50.0 #2930). */
@@ -751,6 +827,25 @@ export interface ProviderLocalUsageSummary {
   tokenCostUpdatedAtMs: number;
 }
 
+export interface QuotaWindowHistoryPoint {
+  offset: number;
+  start: string;
+  end: string;
+  totalTokens: number | null;
+  totalCostUsd: number | null;
+  tokensAreComplete: boolean;
+  costIsComplete: boolean;
+  entryCount: number;
+  boundariesAreEstimated: boolean;
+}
+
+export interface QuotaWindowHistoryBridge {
+  providerId: string;
+  accountScope: string | null;
+  windows: QuotaWindowHistoryPoint[];
+  historyCoverageEstablished: boolean;
+}
+
 export interface ProviderChartData {
   providerId: string;
   costHistory: DailyCostPoint[];
@@ -759,6 +854,7 @@ export interface ProviderChartData {
   localUsage: ProviderLocalUsageSummary | null;
   tokensHistory: DailyTokenPoint[];
   tokensIncomplete: boolean;
+  quotaWindowHistory?: QuotaWindowHistoryBridge | null;
 }
 
 // ── Token account types ──────────────────────────────────────────────
@@ -846,6 +942,9 @@ export interface ProviderDetail {
   id: string;
   displayName: string;
   enabled: boolean;
+  autoResumeAfterQuotaReset: boolean;
+  /** Whether the active credential lane can be correlated to a local CLI session. */
+  autoResumeSupported: boolean;
 
   // Identity
   email: string | null;
@@ -860,11 +959,23 @@ export interface ProviderDetail {
   weekly: RateWindowSnapshot | null;
   modelSpecific: RateWindowSnapshot | null;
   tertiary: RateWindowSnapshot | null;
+  /** Locale key for the tertiary metric lane when it carries a semantic label (upstream F5). */
+  tertiaryLabelKey?: string | null;
   extraRateWindows: Array<{
     id: string;
     title: string;
     window: RateWindowSnapshot;
+    /** Provider-declared fallback lane; only fills in without a core quota window. */
+    fallbackLane?: boolean;
   }>;
+  /** Metric and extra rows exposed by the current provider snapshot. */
+  usageItems?: ProviderUsageItem[];
+  /** Persisted presentation-only hidden metric/extra row IDs. */
+  hiddenUsageItemIds?: string[];
+  /** Display-only discrete provider inventory; never used as quota math. */
+  inventory?: ProviderInventoryItem[];
+  /** Provider-specific display rows; never used as quota math or persistence. */
+  displayDetails?: ProviderDisplayDetail[];
 
   cost: CostSnapshotBridge | null;
   pace: PaceSnapshot | null;
@@ -938,6 +1049,9 @@ export interface CodexAccountUsageSnapshot {
   primaryWindow: CodexUsageWindow | null;
   secondaryWindow: CodexUsageWindow | null;
   credits: CodexCreditsBalance | null;
+  /** Persisted account-scoped extra-usage cost, when available. */
+  cost?: CostSnapshotBridge | null;
+  subscription?: SubscriptionMetadataSnapshot | null;
   updatedAt: string;
 }
 
@@ -953,6 +1067,10 @@ export interface CodexSwitchResult {
 
 export interface CodexAccountsStateBridge {
   accounts: CodexAccount[];
+  /** Canonical privacy-safe account labels, keyed by stable account id. */
+  displayNames?: Record<string, string>;
+  /** Canonical opaque account ordinals, keyed by stable account id. */
+  accountOrdinals: Record<string, number>;
   snapshots: Record<string, CodexAccountUsageSnapshot>;
 }
 export interface ClaudeAccount {
@@ -962,4 +1080,93 @@ export interface ClaudeAccount {
   plan: string | null;
   isActive: boolean;
   isSaved: boolean;
+}
+
+export interface ClaudeReconciliationSnapshot {
+  generation: number;
+  status: "pending" | "succeeded" | "failed";
+  providerRefreshGeneration: number | null;
+  detail: string;
+}
+
+export interface GrokAccount {
+  id: string;
+  email: string;
+  organization: string | null;
+  plan: string | null;
+  isActive: boolean;
+  isSaved: boolean;
+}
+
+export interface GrokAccountUsage {
+  usageAvailable: boolean;
+  usedPercent: number | null;
+  plan: string | null;
+  windowMinutes: number | null;
+  resetsAt: string | null;
+}
+
+/** One source-issued usage window from the external claude-swap adapter. */
+export interface ClaudeSwapUsageWindow {
+  usedPercent: number;
+  /** RFC 3339 timestamp, or null when cswap reported no reset. */
+  resetsAt: string | null;
+}
+
+export interface ClaudeSwapScopedWindow extends ClaudeSwapUsageWindow {
+  /** Display-only provider/model label (e.g. "Fable only"). */
+  name: string;
+}
+
+export interface ClaudeSwapSpendWindow {
+  used: number;
+  limit: number;
+  usedPercent: number;
+  currencyCode: string | null;
+  resetsAt: string | null;
+}
+
+/** Source-reported historical usage. It never drives current provider state. */
+export interface ClaudeSwapHistoricalUsage {
+  fiveHour: ClaudeSwapUsageWindow | null;
+  sevenDay: ClaudeSwapUsageWindow | null;
+  scoped: ClaudeSwapScopedWindow[];
+  spend: ClaudeSwapSpendWindow | null;
+  fetchedAt: string;
+  provenance: "source_reported_last_good";
+}
+
+export type ClaudeSwapAccountAction = "switch" | "reauthenticate";
+
+/**
+ * One external claude-swap account. Identity is the source-issued numeric slot
+ * (`claude-swap:<slot>`); CodexBar never reads or stores its credentials.
+ */
+export interface ClaudeSwapAccount {
+  id: string;
+  slot: number;
+  /** Privacy-aware display label (alias, email, or `Account N`). */
+  label: string;
+  email: string | null;
+  organization: string | null;
+  alias: string | null;
+  isActive: boolean;
+  action: ClaudeSwapAccountAction | null;
+  isDisabled: boolean;
+  /** Raw cswap usageStatus label (e.g. "ok", "token_expired"). */
+  status: string;
+  error: string | null;
+  fiveHour: ClaudeSwapUsageWindow | null;
+  sevenDay: ClaudeSwapUsageWindow | null;
+  scoped: ClaudeSwapScopedWindow[];
+  spend: ClaudeSwapSpendWindow | null;
+  historicalUsage: ClaudeSwapHistoricalUsage | null;
+}
+
+/** External claude-swap adapter state for the Claude accounts settings section. */
+export interface ClaudeSwapAccountsState {
+  enabled: boolean;
+  executableConfigured: boolean;
+  accounts: ClaudeSwapAccount[];
+  error: string | null;
 }

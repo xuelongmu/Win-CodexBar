@@ -1,10 +1,11 @@
-//! Detached "Pop Out Dashboard" flyout window: a resizable, always-on-top,
-//! tray-anchored panel that auto-hides on click-outside (blur-dismiss).
+//! Detached "Pop Out Dashboard" flyout window: a resizable, tray-anchored
+//! panel with optional always-on-top behavior that auto-hides on click-outside.
 //!
 //! Runs as an auxiliary Tauri window labeled `flyout`, independent of the
-//! `main` window's surface state machine — it coexists with "Show Window"
-//! (`SurfaceMode::PopOut`, which stays on `main`) instead of being a
-//! mutually-exclusive state of the same window.
+//! `main` window's surface state machine. It is the only dashboard layout:
+//! tray left-click, "Pop Out Dashboard", the global shortcut, app launch and
+//! single-instance relaunch all open it. The legacy PopOut layout on `main`
+//! is retired.
 //!
 //! Structurally modeled on `crate::floatbar` (self-contained module owning
 //! its window + a `handle_window_event` hook dispatched from `main.rs`
@@ -13,8 +14,10 @@
 //! pass, `WebviewUrl::App` with a `?window=` query marker).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use codexbar::settings::Settings;
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl};
 
 use crate::geometry_store::{self, StoredSize};
@@ -40,6 +43,15 @@ const BLUR_DISMISS_CLICK_WINDOW: Duration = Duration::from_millis(250);
 /// blur (tray click focus race) is ignored — mirrors `main.rs`'s 500ms
 /// `was_tray_panel_recently_shown` guard for the old shared window.
 const RECENTLY_SHOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// Set once at startup by `CODEXBAR_START_VISIBLE`: keeps the flyout open
+/// when it loses focus, for automation flows that need it to stay visible.
+static KEEP_OPEN_ON_BLUR: AtomicBool = AtomicBool::new(false);
+
+/// Keep the flyout open on focus loss for the rest of this process.
+pub fn keep_open_on_blur() {
+    KEEP_OPEN_ON_BLUR.store(true, Ordering::Relaxed);
+}
 
 /// Read the remembered flyout size, if any (migrating a legacy
 /// `"trayPanel"`-keyed size on first read — see `geometry_store::load_size`).
@@ -68,7 +80,9 @@ pub fn is_open(app: &AppHandle) -> bool {
 /// precedent) — callers must invoke this from an async context (an `async`
 /// command, or `tauri::async_runtime::spawn`), never a sync command handler.
 pub fn open_or_focus(app: &AppHandle, position: Option<(i32, i32)>) -> Result<(), String> {
+    let settings = Settings::load();
     if let Some(window) = app.get_webview_window(FLYOUT_LABEL) {
+        apply_window_always_on_top(&window, settings.tray_panel_always_on_top)?;
         if let Some((x, y)) = position {
             // Best-effort reposition before show; the subsequent show/focus
             // is what the user sees, so the position result is non-fatal.
@@ -86,7 +100,7 @@ pub fn open_or_focus(app: &AppHandle, position: Option<(i32, i32)>) -> Result<()
 
     // Derive window properties from `SurfaceMode::TrayPanel.window_properties()`
     // — the historical single source of truth for the flyout's shape (size,
-    // resizability, always-on-top, taskbar visibility). The variant is kept
+    // resizability, taskbar visibility). The variant is kept
     // specifically so this builder (and the geometry-store key, and
     // `default_surface_position`'s positioning branch) have one place to read
     // from, rather than duplicating these values as independent constants
@@ -104,7 +118,7 @@ pub fn open_or_focus(app: &AppHandle, position: Option<(i32, i32)>) -> Result<()
         .decorations(props.decorations)
         .shadow(false)
         .resizable(props.resizable)
-        .always_on_top(props.always_on_top)
+        .always_on_top(settings.tray_panel_always_on_top)
         .skip_taskbar(props.skip_taskbar)
         .theme(Some(tauri::Theme::Dark))
         // CRITICAL: dynamically-built windows default to drag-drop ENABLED,
@@ -118,6 +132,7 @@ pub fn open_or_focus(app: &AppHandle, position: Option<(i32, i32)>) -> Result<()
         builder = builder.min_inner_size(min_w, min_h);
     }
     let win = builder.build().map_err(|e| e.to_string())?;
+    apply_window_always_on_top(&win, settings.tray_panel_always_on_top)?;
 
     // Force DWM caption dark; keep WS_THICKFRAME (resizable) like the
     // Settings window.
@@ -139,6 +154,27 @@ pub fn open_or_focus(app: &AppHandle, position: Option<(i32, i32)>) -> Result<()
     }
     arm_reveal(app)?;
     Ok(())
+}
+
+fn apply_window_always_on_top(window: &tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    window
+        .set_always_on_top(enabled)
+        .map_err(|error| error.to_string())
+}
+
+/// Reapply the setting to the already-created flyout. The label lookup keeps
+/// this native mutation scoped to the tray-panel window.
+pub fn apply_always_on_top(app: &AppHandle, settings: &Settings) {
+    let Some(window) = app.get_webview_window(FLYOUT_LABEL) else {
+        return;
+    };
+    if let Err(error) = apply_window_always_on_top(&window, settings.tray_panel_always_on_top) {
+        tracing::warn!(%error, "failed to apply tray panel always-on-top setting");
+    }
+}
+
+fn should_dismiss_on_blur(settings: &Settings) -> bool {
+    !settings.tray_panel_always_on_top
 }
 
 fn show_grace_starts_now(first_build_hidden: bool) -> bool {
@@ -226,7 +262,16 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
 
     match event {
         tauri::WindowEvent::Focused(false) => {
-            if crate::proof_harness::is_proof_mode(app) {
+            let settings = Settings::load();
+            if !should_dismiss_on_blur(&settings) {
+                // Keep the opt-in flyout visible when focus moves elsewhere;
+                // reapplying the native state also repairs any transient z-order
+                // change caused by the focus transition.
+                let _ = window.set_always_on_top(true);
+                return true;
+            }
+            if crate::proof_harness::is_proof_mode(app) || KEEP_OPEN_ON_BLUR.load(Ordering::Relaxed)
+            {
                 return true;
             }
             let Some(st) = app.try_state::<Mutex<AppState>>() else {
@@ -372,7 +417,7 @@ mod tests {
     #[test]
     fn tray_panel_window_properties_still_the_single_source_for_flyout_shape() {
         // `open_or_focus`'s builder reads size/decorations/resizable/
-        // always_on_top/skip_taskbar/min-size from
+        // skip_taskbar/min-size from
         // `SurfaceMode::TrayPanel.window_properties()` directly (not
         // independent duplicated constants) — this pins down the values that
         // relationship depends on, so a change to `surface.rs` shows up here
@@ -383,7 +428,7 @@ mod tests {
         assert_eq!(props.min_width, Some(300.0));
         assert_eq!(props.min_height, Some(360.0));
         assert!(props.resizable);
-        assert!(props.always_on_top);
+        assert!(!props.always_on_top);
         assert!(props.skip_taskbar);
         assert!(!props.decorations);
     }
@@ -392,5 +437,14 @@ mod tests {
     fn first_hidden_build_does_not_start_show_grace() {
         assert!(show_grace_starts_now(false));
         assert!(!show_grace_starts_now(true));
+    }
+
+    #[test]
+    fn tray_panel_blur_dismissal_is_disabled_only_when_opted_in() {
+        assert!(should_dismiss_on_blur(&Settings::default()));
+        assert!(!should_dismiss_on_blur(&Settings {
+            tray_panel_always_on_top: true,
+            ..Settings::default()
+        }));
     }
 }

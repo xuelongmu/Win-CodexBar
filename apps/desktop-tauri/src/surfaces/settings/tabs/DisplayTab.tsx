@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocale } from "../../../hooks/useLocale";
 import { Field, Select, Toggle } from "../../../components/FormControls";
-import type { MenuBarDisplayMode, TrayIconMode, TrayVisibilityStatusDto } from "../../../types/bridge";
+import type {
+  MenuBarDisplayMode,
+  OverviewLayout,
+  TrayIconMode,
+  TrayVisibilityStatusDto,
+} from "../../../types/bridge";
 import type { TabProps } from "../settingsTabs";
 import FloatBarSettingsSection from "../../../floatbar/SettingsSection";
 import { getTrayVisibilityStatus } from "../../../lib/tauri";
-
-function clampWindowScalePercent(value: number): number {
-  return Math.min(250, Math.max(100, Number.isFinite(value) ? value : 100));
-}
 
 export default function DisplayTab({
   mode = "menu",
@@ -17,9 +18,6 @@ export default function DisplayTab({
   saving,
 }: TabProps & { mode?: "menuBar" | "menu" }) {
   const { t } = useLocale();
-  const [windowScaleDraft, setWindowScaleDraft] = useState(() =>
-    clampWindowScalePercent(settings.windowScalePercent),
-  );
   const [trayVisibility, setTrayVisibility] = useState<TrayVisibilityStatusDto | null>(null);
 
   useEffect(() => {
@@ -28,16 +26,6 @@ export default function DisplayTab({
       .catch(() => setTrayVisibility(null));
   }, []);
 
-  useEffect(() => {
-    setWindowScaleDraft(clampWindowScalePercent(settings.windowScalePercent));
-  }, [settings.windowScalePercent]);
-
-  const commitWindowScale = useCallback(() => {
-    const next = clampWindowScalePercent(windowScaleDraft);
-    if (next !== settings.windowScalePercent) {
-      set({ windowScalePercent: next });
-    }
-  }, [set, settings.windowScalePercent, windowScaleDraft]);
   return (
     <>
       {/* ── Menu bar ─────────────────────────────────────────────── */}
@@ -131,26 +119,15 @@ export default function DisplayTab({
         <h3 className="settings-section__title">{t("TabMenu")}</h3>
         <div className="settings-section__group">
           <Field
-            label={`${t("WindowScaleLabel")} (${windowScaleDraft}%)`}
-            description={t("WindowScaleHelper")}
+            label={t("TrayPanelAlwaysOnTopLabel")}
+            description={t("TrayPanelAlwaysOnTopHelper")}
+            leading
           >
-            <input
-              type="range"
-              min={100}
-              max={250}
-              step={5}
-              value={windowScaleDraft}
+            <Toggle
+              checked={settings.trayPanelAlwaysOnTop}
+              ariaLabel={t("TrayPanelAlwaysOnTopLabel")}
               disabled={saving}
-              onChange={(e) =>
-                setWindowScaleDraft(
-                  clampWindowScalePercent(Number(e.target.value)),
-                )
-              }
-              onPointerUp={commitWindowScale}
-              onTouchEnd={commitWindowScale}
-              onBlur={commitWindowScale}
-              onKeyUp={commitWindowScale}
-              aria-label={t("WindowScaleAriaLabel")}
+              onChange={(v) => set({ trayPanelAlwaysOnTop: v })}
             />
           </Field>
           <Field
@@ -162,6 +139,20 @@ export default function DisplayTab({
               checked={settings.showAsUsed}
               disabled={saving}
               onChange={(v) => set({ showAsUsed: v })}
+            />
+          </Field>
+          <Field
+            label={t("OverviewLayoutLabel")}
+            description={t("OverviewLayoutHelper")}
+          >
+            <Select
+              value={settings.overviewLayout}
+              disabled={saving}
+              options={[
+                { value: "detailed", label: t("OverviewLayoutDetailed") },
+                { value: "compact", label: t("OverviewLayoutCompact") },
+              ]}
+              onChange={(v) => set({ overviewLayout: v as OverviewLayout })}
             />
           </Field>
           <Field

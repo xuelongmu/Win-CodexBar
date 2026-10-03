@@ -1,9 +1,14 @@
 import type {
+  ProviderDisplayDetail,
+  ProviderInventoryItem,
   ProviderDetail,
   RateWindowSnapshot,
 } from "../../../../types/bridge";
+import { InventoryItemRow } from "../../../../components/InventoryRows";
+import { ProviderDisplayRow } from "../../../../components/ProviderDisplayRow";
 import type { LocaleKey } from "../../../../i18n/keys";
 import { useFormattedResetTime } from "../../../../hooks/useFormattedResetTime";
+import { isUsageItemVisible } from "../../../../lib/usageItemVisibility";
 
 interface Props {
   provider: ProviderDetail;
@@ -24,28 +29,28 @@ interface BarSpec {
  */
 export function UsageSection({ provider, resetTimeRelative, t }: Props) {
   const bars: BarSpec[] = [];
-  if (provider.session) {
+  if (provider.session && isUsageItemVisible(provider.hiddenUsageItemIds, "primary")) {
     bars.push({
       key: "session",
       label: t("ProviderSessionLabel"),
       rate: provider.session,
     });
   }
-  if (provider.weekly) {
+  if (provider.weekly && isUsageItemVisible(provider.hiddenUsageItemIds, "secondary")) {
     bars.push({
       key: "weekly",
       label: t("ProviderWeeklyLabel"),
       rate: provider.weekly,
     });
   }
-  if (provider.modelSpecific) {
+  if (provider.modelSpecific && isUsageItemVisible(provider.hiddenUsageItemIds, "model-specific")) {
     bars.push({
       key: "modelSpecific",
       label: t("DetailWindowModelSpecific"),
       rate: provider.modelSpecific,
     });
   }
-  if (provider.tertiary) {
+  if (provider.tertiary && isUsageItemVisible(provider.hiddenUsageItemIds, "tertiary")) {
     bars.push({
       key: "tertiary",
       label: t("DetailWindowTertiary"),
@@ -53,6 +58,9 @@ export function UsageSection({ provider, resetTimeRelative, t }: Props) {
     });
   }
   for (const extra of provider.extraRateWindows ?? []) {
+    if (!isUsageItemVisible(provider.hiddenUsageItemIds, `extra-${extra.id}`)) {
+      continue;
+    }
     bars.push({
       key: extra.id,
       label: extra.title,
@@ -60,7 +68,9 @@ export function UsageSection({ provider, resetTimeRelative, t }: Props) {
     });
   }
 
-  if (bars.length === 0) {
+  const inventory = provider.inventory ?? [];
+  const displayDetails = provider.displayDetails ?? [];
+  if (bars.length === 0 && inventory.length === 0 && displayDetails.length === 0) {
     return null;
   }
 
@@ -74,6 +84,23 @@ export function UsageSection({ provider, resetTimeRelative, t }: Props) {
           rate={b.rate}
           resetTimeRelative={resetTimeRelative}
           t={t}
+        />
+      ))}
+      {inventory.map((item) => (
+        <InventoryItemRow
+          key={item.id}
+          item={item}
+          resetTimeRelative={resetTimeRelative}
+          lineClassName="provider-usage-inventory"
+        />
+      ))}
+      {displayDetails.map((detail) => (
+        <ProviderDisplayRow
+          key={detail.id}
+          detail={detail}
+          lineClassName="provider-usage-inventory"
+          trackClassName="provider-usage-bar__track"
+          fillClassName="provider-usage-bar__fill"
         />
       ))}
     </section>

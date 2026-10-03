@@ -2,7 +2,13 @@ import { Fragment, useEffect, useState, type CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { BootstrapState, ProviderUsageSnapshot, UsageSpendSummary } from "../types/bridge";
 import type { LocaleKey } from "../i18n/keys";
-import { beginFlyoutGesture, getUsageSpendSummary, openProviderDashboard, openProviderStatusPage } from "../lib/tauri";
+import {
+  beginFlyoutGesture,
+  getUsageSpendSummary,
+  openProviderDashboard,
+  openProviderStatusPage,
+  openSettingsWindow,
+} from "../lib/tauri";
 import {
   TRAY_SCALE_MAX,
   TRAY_SCALE_MIN,
@@ -14,6 +20,11 @@ import MenuSurface, { MenuEmpty } from "../components/MenuSurface";
 import UpdateBanner from "../components/UpdateBanner";
 import ProviderGrid from "../components/ProviderGrid";
 import AgentSessions from "../components/AgentSessions";
+import { hasSuccessfulClaudeCliQuota } from "../lib/claudeAccountActions";
+import {
+  filterUsageSpendSummaryForOverview,
+  shareUsageSpendPng,
+} from "../lib/usageSpendSharing";
 
 /** Provider IDs that have a dashboard URL in the backend */
 const HAS_DASHBOARD = new Set([
@@ -21,11 +32,11 @@ const HAS_DASHBOARD = new Set([
   "azureopenai", "bedrock", "claude", "codex", "codebuff",
   "aiand", "commandcode", "copilot", "crof", "crossmodel", "cursor", "deepgram", "deepinfra", "deepseek", "zenmux", "clinepass", "longcat", "neuralwatt", "zoommate",
   "doubao", "elevenlabs", "factory", "gemini", "grok", "groq",
-  "infini", "jetbrains", "kilo", "kimi", "kimik2", "kiro", "manus",
+  "infini", "jetbrains", "kilo", "kimi", "kimik2", "kiro", "manus", "replicate",
   "mimo", "minimax", "mistral", "nanogpt", "notion", "ollama", "openaiapi",
   "opencode", "opencodego", "openrouter", "perplexity", "qoder", "codebuddy", "sakana", "stepfun",
   "t3chat", "venice", "vertexai", "warp", "windsurf",
-  "xai", "zai", "fireworks",
+  "xai", "zai", "fireworks", "meta", "muse", "nous",
 ]);
 /** Provider IDs that have a status page URL in the backend */
 const HAS_STATUS_PAGE = new Set([
@@ -46,7 +57,6 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     settings,
     isRefreshing,
     refreshingProviderIds,
-    refresh,
     hasCachedData,
     trayScaleDraft,
     trayScale,
@@ -62,7 +72,6 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     wideColumns,
     useWideColumns,
     requestLayout,
-    headerActions,
     footerRows,
     updateState,
     checkNow,
@@ -127,7 +136,8 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
             showResetWhenExhausted: settings.showResetWhenExhausted,
             showPace: settings.showPace ?? true,
             showAsUsed: settings.showAsUsed,
-            compactMetrics: selectedProviderId === null,
+            compactOverview:
+              selectedProviderId === null && settings.overviewLayout !== "detailed",
             costSummaryDisplayStyle: settings.costSummaryDisplayStyle,
           }}
           accentColor={settings.providerAccentColors[p.providerId]}
@@ -137,14 +147,16 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
     );
   };
 
+  const selectedProvider = selectedProviderId
+    ? sorted.find((provider) => provider.providerId === selectedProviderId) ?? null
+    : null;
+  const canSwitchClaudeAccount =
+    selectedProvider !== null && hasSuccessfulClaudeCliQuota(selectedProvider);
+
   if (sorted.length === 0) {
     return (
       <div className={revealClassName}>
         <MenuSurface
-          variant="tray"
-          onRefresh={refresh}
-          isRefreshing={isRefreshing}
-          actions={headerActions}
           banner={banner}
           footerLead={zoomRow}
           footerRows={footerRows}
@@ -164,10 +176,6 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
   return (
     <div className={revealClassName}>
       <MenuSurface
-        variant="tray"
-        onRefresh={refresh}
-        isRefreshing={isRefreshing}
-        actions={headerActions}
         banner={banner}
         footerLead={zoomRow}
         footerRows={footerRows}
@@ -208,9 +216,24 @@ export default function TrayPanel({ state }: { state: BootstrapState }) {
               ))}
         </div>
         {/* Context actions — detail mode only, matches macOS actionsSection */}
-        {selectedProviderId && (HAS_DASHBOARD.has(selectedProviderId) || HAS_STATUS_PAGE.has(selectedProviderId)) && (
+        {selectedProviderId &&
+          (HAS_DASHBOARD.has(selectedProviderId) ||
+            HAS_STATUS_PAGE.has(selectedProviderId) ||
+            canSwitchClaudeAccount) && (
           <div className="context-actions">
             <div className="context-actions__divider" />
+            {canSwitchClaudeAccount && (
+              <button
+                type="button"
+                className="context-actions__btn"
+                onClick={() => openSettingsWindow("providers")}
+              >
+                <span className="context-actions__icon" aria-hidden>
+                  ⇄
+                </span>
+                {t("ActionSwitchAccount")}
+              </button>
+            )}
             {HAS_DASHBOARD.has(selectedProviderId) && (
               <button
                 type="button"
@@ -305,6 +328,7 @@ function TrayResizeHandles() {
 
 function OverviewSpendSummary({ providerIds, t }: { providerIds: string[]; t: (key: LocaleKey) => string }) {
   const [summary, setSummary] = useState<UsageSpendSummary | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -314,10 +338,22 @@ function OverviewSpendSummary({ providerIds, t }: { providerIds: string[]; t: (k
     return () => { cancelled = true; };
   }, [providerIds.join("|")]);
 
-  if (!summary) return null;
   // Overview consumes the same backend spend catalog as Usage & Spend. Do not
   // restrict accounting to whichever cards happen to be rendered in this tray.
-  const rows = summary.rows.filter((row) => row.includedInOverview !== false);
+  const overviewSummary = summary ? filterUsageSpendSummaryForOverview(summary) : null;
+
+  if (!overviewSummary) return null;
+  const onShare = () => {
+    setShareError(null);
+    const error = shareUsageSpendPng(
+      overviewSummary,
+      t("OverviewSpendTitle"),
+      `codexbar-overview-usage-${overviewSummary.reportingDay}.png`,
+    );
+    if (error) setShareError(t(error as LocaleKey));
+  };
+
+  const rows = overviewSummary.rows;
   const summable = rows.filter((row) => (row.currency || "USD") === "USD");
   const known = summable.filter((row) => row.thirtyDay != null && Number.isFinite(row.thirtyDay));
   if (known.length === 0) return null;
@@ -334,6 +370,19 @@ function OverviewSpendSummary({ providerIds, t }: { providerIds: string[]; t: (k
       <div className="settings-section__caption" style={{ marginTop: 4 }}>
         {known.length} of {rows.length} {t("OverviewSpendProviderCoverage")} · {t("OverviewSpendEstimate")}
       </div>
+      <button
+        type="button"
+        className="credential-btn credential-btn--secondary"
+        style={{ marginTop: 8 }}
+        onClick={onShare}
+      >
+        {t("UsageSpendShare")}
+      </button>
+      {shareError && (
+        <div className="settings-section__caption" role="status" style={{ marginTop: 4 }}>
+          {shareError}
+        </div>
+      )}
     </div>
   );
 }

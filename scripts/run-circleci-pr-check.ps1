@@ -21,7 +21,8 @@
     - pnpm: the exact packageManager pin from apps/desktop-tauri/package.json
       is activated by corepack and asserted.
     - Checks: delegates everything else to scripts\local-check.ps1 -Slice ci,
-      the single source of truth for fmt/clippy/test/frontend/guard steps.
+      the single source of truth for fmt/clippy/test/frontend lint and
+      guard steps.
 
     Pure checksum logic lives in scripts\circleci-pr-common.ps1 and is
     exercised by scripts\circleci-pr.tests.ps1 without network access.
@@ -89,6 +90,9 @@ try {
     $nodeDir = ''
     $imageNodeVersion = $null
     if (Get-Command node -ErrorAction SilentlyContinue) { $imageNodeVersion = (& node --version).Trim() }
+    # Keep the image version available when the hosted image already provides
+    # the required major and no MSI installation is needed.
+    $installedNodeVersion = $imageNodeVersion
     $activeNodeMajor = 0
     if ($imageNodeVersion -match '^v(\d+)\.') { $activeNodeMajor = [int]$Matches[1] }
     if ($activeNodeMajor -ne $NodeMajor) {
@@ -139,8 +143,8 @@ try {
 
     # --- Checks -------------------------------------------------------------
     # Delegate the check slice to the local-check script (fmt/clippy/test,
-    # frontend install/test/build, interaction-guard tests) with the PATH
-    # prefix set once. local-check.ps1 resolves commands through PATH, so
+    # frontend install/lint/rule-tests/test/build, interaction-guard tests)
+    # with the PATH prefix set once. local-check.ps1 resolves commands through PATH, so
     # this in-process call inherits the provisioned toolchain.
     & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\local-check.ps1') -Slice ci
     if ($LASTEXITCODE -ne 0) { throw "local-check.ps1 -Slice ci failed with exit code $LASTEXITCODE" }

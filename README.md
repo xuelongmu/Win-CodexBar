@@ -43,8 +43,8 @@ Winget distribution is approved through [microsoft/winget-pkgs](https://github.c
 
 ## Code signing
 
-> **Code signing:** Free signing via SignPath.io (certificate: SignPath Foundation) is **planned, pending onboarding — not yet wired into the release pipeline**. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for the signing policy.
-> Windows release installers are currently unsigned, which may cause an incorrect SmartScreen/Defender alert — verify the SHA-256 published alongside each release; see [docs/PRIVACY.md](docs/PRIVACY.md) for data handling.
+> **Code signing:** SignPath.io is wired into the GitHub Actions release path, but production signing remains fail-closed until the Release certificate 2026 is issued and the `release-signing` policy becomes valid. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for the signing policy.
+> The v0.60.3 release is immutable and unsigned; verify its SHA-256 files. The first signed release will be the next normal version after SignPath onboarding.
 
 ## First Run
 
@@ -80,6 +80,7 @@ See the full history in [CHANGELOG.md](CHANGELOG.md).
 | MiniMax | API / Cookies | Usage, Billing Summary |
 | Kiro | Cookies / CLI | Monthly Credits, Overage |
 | Vertex AI | gcloud OAuth | Cost |
+| v0 | API Key | Billing quota, API rate limits, on-demand balance |
 | Augment | Cookies | Credits |
 | OpenCode | Local Config | Usage |
 | Kimi | Cookies | 5h Rate, Weekly |
@@ -89,6 +90,7 @@ See the full history in [CHANGELOG.md](CHANGELOG.md).
 | Ollama | Cookies / API Key | Usage, Cloud Models, Pace windows |
 | Azure OpenAI | API Key | Deployment |
 | T3 Chat | Cookies / cURL | Base, Overage |
+| TypeSafe | Browser cookies / manual Cookie header | Billing-cycle spend, balance, expiring credits |
 | OpenRouter | API Key | Credits |
 | JetBrains AI | Local Config | Usage |
 | Alibaba | Cookies | Usage |
@@ -112,6 +114,8 @@ See the full history in [CHANGELOG.md](CHANGELOG.md).
 | Venice | API Key | USD / DIEM Balance |
 | OpenAI | Admin API / API Key | Usage, Requests, Project-scoped cost, Credit Balance |
 | Grok | Cookies / auth.json | Billing |
+| Helmcode (also NaN Builders) | Browser cookies / manual Cookie header | Per-model token quotas, reset windows, Helmcode prepaid balance |
+| Replicate | Cookies / token accounts | Monthly spend, credit balance |
 | ElevenLabs | API Key | Subscription Credits, Voice Slots |
 | Deepgram | API Key | Project Usage |
 | Groq | API Key | Enterprise Metrics |
@@ -190,6 +194,7 @@ More release automation notes live in [docs/release/ci-cd.md](docs/release/ci-cd
 ## Local integrations
 
 - [AI Usage Limits](https://github.com/lenadweb/stream-deck-ai-limits) — Elgato Stream Deck integration that can consume the local `codexbar serve` dashboard/API to show provider, account, quota, or payload metrics.
+- [AI Monitor](https://github.com/tobymarks/esp32-ai-monitor) — ESP32 desk display (Cheap Yellow Display) with a Windows companion app (beta) that calls the installed CLI (`codexbar-cli usage -p <provider> --json`) and streams Claude, Codex, Copilot, Cursor, Gemini, or Antigravity limits to the display over USB serial.
 
 ## Credits
 
