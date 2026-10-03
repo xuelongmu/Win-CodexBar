@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import type { GrokAccount, GrokAccountUsage } from "../types/bridge";
-import { grokAccountSwitch } from "../lib/tauri";
+import { grokAccountAdd, grokAccountCancelLogin, grokAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
 import { useFormattedResetTime } from "../hooks/useFormattedResetTime";
 import { useGrokAccounts } from "../hooks/useGrokAccounts";
 import { maskEmail } from "./MenuCard";
+import ProviderAccountsMenu from "./ProviderAccountsMenu";
 
 export default function GrokAccountsMenu({
   hideEmail,
@@ -17,32 +18,44 @@ export default function GrokAccountsMenu({
 }) {
   const { t } = useLocale();
   const [switched, setSwitched] = useState(false);
-  const { accounts, usage, busy, error, run } = useGrokAccounts({ reloadOnFocus: true });
+  const [signingIn, setSigningIn] = useState(false);
+  const { accounts, usage, busy, error, reportError, run } = useGrokAccounts({ reloadOnFocus: true });
   useEffect(() => {
     onLayoutChange?.();
-  }, [accounts.length, error, switched, onLayoutChange]);
+  }, [accounts, error, switched, signingIn, onLayoutChange]);
 
   const switchAccount = async (id: string) => {
     setSwitched(false);
     await run(() => grokAccountSwitch(id), () => setSwitched(true));
   };
 
-  const hasSwitchableAccount = accounts.some(
-    (account) => account.isSaved && !account.isActive,
-  );
-  if (accounts.length <= 1 && !hasSwitchableAccount && !error) return null;
+  const addAccount = () => {
+    setSwitched(false);
+    setSigningIn(true);
+    void run(grokAccountAdd, undefined, () => setSigningIn(false));
+  };
   return (
-    <details className="codex-menu-accounts" onToggle={onLayoutChange}>
-      <summary className="codex-menu-accounts__summary">
-        <span className="codex-menu-accounts__title">{t("GrokAccountsTitle")}</span>
-        <span className="codex-menu-accounts__count">{accounts.length}</span>
-      </summary>
+    <ProviderAccountsMenu
+      title={t("GrokAccountsTitle")}
+      count={accounts.length}
+      aria-busy={busy}
+      onLayoutChange={onLayoutChange}
+      actions={<>
+        <button type="button" className="codex-menu-accounts__action" disabled={busy} onClick={addAccount}>
+          {t("CodexAccountsAddButton")}
+        </button>
+        {signingIn && <button type="button" className="codex-menu-accounts__action" onClick={() => void grokAccountCancelLogin().catch(reportError)}>
+          {t("GrokAccountsCancelLogin")}
+        </button>}
+      </>}
+    >
       {error && (
         <div className="codex-menu-accounts__error" role="alert">
           {error}
         </div>
       )}
       {switched && <p role="status">{t("GrokAccountsSwitched")}</p>}
+      {signingIn && <p className="codex-menu-accounts__usage" role="status">{t("GrokAccountsSigningIn")}</p>}
       <ul className="codex-menu-accounts__list">
         {accounts.map((account) => (
           <GrokAccountRow
@@ -56,7 +69,7 @@ export default function GrokAccountsMenu({
           />
         ))}
       </ul>
-    </details>
+    </ProviderAccountsMenu>
   );
 }
 

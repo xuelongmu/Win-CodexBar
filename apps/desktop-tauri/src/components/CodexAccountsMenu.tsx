@@ -7,6 +7,7 @@ import type {
 } from "../types/bridge";
 import { useLocale } from "../hooks/useLocale";
 import { useFormattedResetTime } from "../hooks/useFormattedResetTime";
+import ProviderAccountsMenu from "./ProviderAccountsMenu";
 import { buildCodexAccountSurfaceLabels } from "./codexAccountDisplay";
 import {
   codexAccountAdd,
@@ -106,16 +107,12 @@ export default function CodexAccountsMenu({
   );
 
   return (
-    <section
-      className="codex-menu-accounts"
-      aria-label={t("CodexAccountsTitle")}
+    <ProviderAccountsMenu
+      title={t("CodexAccountsTitle")}
+      count={accounts.length}
       aria-busy={busy}
-    >
-      <div className="codex-menu-accounts__heading">
-        <span className="codex-menu-accounts__title">{t("CodexAccountsTitle")}</span>
-        <span className="codex-menu-accounts__count">{accounts.length}</span>
-      </div>
-      <div className="codex-menu-accounts__actions">
+      onLayoutChange={onLayoutChange}
+      actions={<>
         <button
           type="button"
           className="codex-menu-accounts__action"
@@ -134,7 +131,9 @@ export default function CodexAccountsMenu({
             {t("CodexAccountsReauthenticateButton")}
           </button>
         )}
-      </div>
+      </>}
+    >
+
       {pending && (
         <div className="codex-menu-accounts__usage" role="status">
           {t(signingIn ? "CodexAccountsSigningIn" : "TrayLoading")}
@@ -166,7 +165,7 @@ export default function CodexAccountsMenu({
           })}
         </ul>
       )}
-    </section>
+    </ProviderAccountsMenu>
   );
 }
 

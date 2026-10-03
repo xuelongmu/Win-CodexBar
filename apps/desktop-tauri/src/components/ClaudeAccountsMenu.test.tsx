@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => {
   const listeners = new Map<string, (event: { payload: unknown }) => void>();
   return {
     claudeAccountsList: vi.fn(),
+    claudeAccountAdd: vi.fn(),
+    claudeAccountCancelLogin: vi.fn(),
     claudeAccountSwitch: vi.fn(),
     claudeReconciliationState: vi.fn(),
     refreshProviders: vi.fn(),
@@ -68,6 +70,40 @@ describe("ClaudeAccountsMenu", () => {
     expect(button).not.toBeDisabled();
     await act(async () => fireEvent.click(button));
     expect(mocks.claudeAccountSwitch).toHaveBeenCalledWith(second.id);
+  });
+
+  it("shows one active account and adds from the footer with cancellable sign-in", async () => {
+    mocks.claudeAccountsList.mockResolvedValue([first]);
+    let finishLogin: (() => void) | undefined;
+    mocks.claudeAccountAdd.mockImplementation(() => new Promise<void>(resolve => { finishLogin = resolve; }));
+    mocks.claudeAccountCancelLogin.mockResolvedValue(undefined);
+    const { container } = render(<ClaudeAccountsMenu hideEmail={false} />);
+    const account = await screen.findByText(first.email);
+    expect(container.querySelector("details")?.open).toBe(true);
+    const add = screen.getByRole("button", { name: "CodexAccountsAddButton" });
+    expect(account.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await act(async () => fireEvent.click(add));
+    expect(mocks.claudeAccountAdd).toHaveBeenCalledOnce();
+    expect(add).toBeDisabled();
+    expect(screen.getByText("ClaudeAccountsSigningIn")).toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "ClaudeAccountsCancelLogin" })));
+    expect(mocks.claudeAccountCancelLogin).toHaveBeenCalledOnce();
+    mocks.claudeAccountsList.mockResolvedValue([first, second]);
+    await act(async () => finishLogin?.());
+    expect(await screen.findByText(second.email)).toBeInTheDocument();
+    expect(add).toBeEnabled();
+    expect(mocks.claudeAccountSwitch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the add action available when no accounts are saved and shows sign-in failures", async () => {
+    mocks.claudeAccountsList.mockResolvedValue([]);
+    mocks.claudeAccountAdd.mockRejectedValue("Login cancelled.");
+    render(<ClaudeAccountsMenu hideEmail={false} />);
+    const add = screen.getByRole("button", { name: "CodexAccountsAddButton" });
+    await waitFor(() => expect(add).toBeEnabled());
+    await act(async () => fireEvent.click(add));
+    expect(screen.getByRole("alert")).toHaveTextContent("Login cancelled.");
+    expect(add).toBeEnabled();
   });
 
   it("keeps the menu in activating and reconciling phases until the switch settles", async () => {
@@ -175,7 +211,7 @@ describe("ClaudeAccountsMenu", () => {
   it("uses stable opaque account labels and redacts tooltips when hideEmail is enabled", async () => {
     mocks.claudeAccountsList.mockResolvedValue([first, { ...second, organization: `${second.email}'s Organization` }]);
     const { container } = render(<ClaudeAccountsMenu hideEmail />);
-    await screen.findByText("ClaudeAccountsTitle");
+    await screen.findByText("Account 1");
     const labels = container.querySelectorAll(".codex-menu-accounts__email");
     expect(labels[0].firstChild?.textContent).toBe("Account 1");
     expect(labels[0].getAttribute("title")).toBe("Account 1");
@@ -189,7 +225,7 @@ describe("ClaudeAccountsMenu", () => {
 
   it("keeps opaque labels stable when the source reorders accounts", async () => {
     const { container } = render(<ClaudeAccountsMenu hideEmail />);
-    await screen.findByText("ClaudeAccountsTitle");
+    await screen.findByText("Account 1");
     mocks.claudeAccountsList.mockResolvedValue([second, first]);
     await act(async () => window.dispatchEvent(new Event("focus")));
     await waitFor(() => {

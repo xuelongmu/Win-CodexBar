@@ -5793,19 +5793,12 @@ button, input, select, textarea {
   max-width: 240px;
 }
 
-/* Keep account usage and login actions discoverable in the tray. */
-.codex-menu-accounts__heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
+/* Account login actions follow each provider's account list. */
 .codex-menu-accounts__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-top: 6px;
 }
 .codex-menu-accounts__usage {
   flex-wrap: wrap;

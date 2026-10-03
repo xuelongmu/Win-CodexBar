@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { ClaudeAccount } from "../types/bridge";
-import { claudeAccountsList, claudeAccountSwitch } from "../lib/tauri";
+import { claudeAccountsList, claudeAccountAdd, claudeAccountCancelLogin, claudeAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
 import ClaudeAccountUsage from "./ClaudeAccountUsage";
+import ProviderAccountsMenu from "./ProviderAccountsMenu";
 import {
   localClaudeReconciliationOutcome,
   useClaudeReconciliation,
@@ -24,14 +25,20 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
   const [error, setError] = useState<string | null>(null);
   const [switched, setSwitched] = useState(false);
   const [activating, setActivating] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [operationGeneration, setOperationGeneration] = useState<number | null>(null);
   const { snapshot, accept, reconciling } = useClaudeReconciliation();
   const mounted = useRef(false);
   const load = useCallback(async () => {
-    const next = await claudeAccountsList();
-    if (mounted.current) {
-      setAccounts(next);
-      setError(null);
+    try {
+      const next = await claudeAccountsList();
+      if (mounted.current) {
+        setAccounts(next);
+        setError(null);
+      }
+    } finally {
+      if (mounted.current) setLoading(false);
     }
   }, []);
   useEffect(() => {
@@ -68,7 +75,7 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
         : "idle";
   useEffect(() => {
     onLayoutChange?.();
-  }, [accounts, error, phase, switched, onLayoutChange]);
+  }, [accounts, error, phase, switched, signingIn, onLayoutChange]);
 
   const accountOrdinals = buildClaudeAccountOrdinals(accounts);
 
@@ -91,21 +98,39 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
     }
   };
 
-  const hasSwitchableAccount = accounts.some(account => account.isSaved && !account.isActive);
-  if (accounts.length <= 1 && !hasSwitchableAccount && !error) return null;
+  const addAccount = async () => {
+    setSigningIn(true);
+    setError(null);
+    setSwitched(false);
+    try {
+      await claudeAccountAdd();
+      await load();
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    } finally {
+      if (mounted.current) setSigningIn(false);
+    }
+  };
+  const busy = loading || activating || reconciling || signingIn;
   return (
-    <details
-      className="codex-menu-accounts"
+    <ProviderAccountsMenu
+      title={t("ClaudeAccountsTitle")}
+      count={accounts.length}
       data-claude-account-phase={phase}
-      aria-busy={phase === "activating" || phase === "reconciling"}
-      onToggle={onLayoutChange}
+      aria-busy={busy}
+      onLayoutChange={onLayoutChange}
+      actions={<>
+        <button type="button" className="codex-menu-accounts__action" disabled={busy} onClick={() => void addAccount()}>
+          {t("CodexAccountsAddButton")}
+        </button>
+        {signingIn && <button type="button" className="codex-menu-accounts__action" onClick={() => void claudeAccountCancelLogin().catch(e => { if (mounted.current) setError(String(e)); })}>
+          {t("ClaudeAccountsCancelLogin")}
+        </button>}
+      </>}
     >
-      <summary className="codex-menu-accounts__summary">
-        <span className="codex-menu-accounts__title">{t("ClaudeAccountsTitle")}</span>
-        <span className="codex-menu-accounts__count">{accounts.length}</span>
-      </summary>
       {error && <div className="codex-menu-accounts__error" role="alert">{error}</div>}
       {switched && <p role="status">{t("ClaudeAccountsSwitched")}</p>}
+      {signingIn && <p className="codex-menu-accounts__usage" role="status">{t("ClaudeAccountsSigningIn")}</p>}
       <ul className="codex-menu-accounts__list">
         {accounts.map(account => {
           const privateLabel = buildPrivateClaudeAccountLabel(
@@ -130,7 +155,7 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
                 <button
                   type="button"
                   className="codex-menu-accounts__switch"
-                  disabled={phase === "activating" || phase === "reconciling" || account.isActive || !account.isSaved}
+                  disabled={busy || account.isActive || !account.isSaved}
                   onClick={() => void switchAccount(account.id)}
                 >
                   {t("CodexAccountsSwitchButton")}
@@ -140,6 +165,6 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
           );
         })}
       </ul>
-    </details>
+    </ProviderAccountsMenu>
   );
 }

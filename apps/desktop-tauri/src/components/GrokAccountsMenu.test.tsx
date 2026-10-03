@@ -1,10 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GrokAccount } from "../types/bridge";
 
 const mocks = vi.hoisted(() => ({
   grokAccountsList: vi.fn(),
   grokAccountSwitch: vi.fn(),
+  grokAccountAdd: vi.fn(),
+  grokAccountCancelLogin: vi.fn(),
   grokAccountFetch: vi.fn(),
 }));
 vi.mock("../lib/tauri", () => mocks);
@@ -69,5 +71,38 @@ describe("GrokAccountsMenu", () => {
     await screen.findByText(first.email);
     expect(screen.queryByText(/PanelUsedSuffix/)).toBeNull();
     expect(container.querySelectorAll(".codex-menu-accounts__bar-fill")).toHaveLength(0);
+  });
+
+  it("shows a single active account and adds from the footer with cancellable sign-in", async () => {
+    mocks.grokAccountsList.mockResolvedValue([first]);
+    let finishLogin: (() => void) | undefined;
+    mocks.grokAccountAdd.mockImplementation(() => new Promise<void>(resolve => { finishLogin = resolve; }));
+    mocks.grokAccountCancelLogin.mockResolvedValue(undefined);
+    const { container } = render(<GrokAccountsMenu hideEmail={false} resetTimeRelative />);
+    const account = await screen.findByText(first.email);
+    expect(container.querySelector("details")?.open).toBe(true);
+    const add = screen.getByRole("button", { name: "CodexAccountsAddButton" });
+    expect(account.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await act(async () => fireEvent.click(add));
+    expect(mocks.grokAccountAdd).toHaveBeenCalledOnce();
+    expect(add).toBeDisabled();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "GrokAccountsCancelLogin" })));
+    expect(mocks.grokAccountCancelLogin).toHaveBeenCalledOnce();
+    mocks.grokAccountsList.mockResolvedValue([first, second]);
+    await act(async () => finishLogin?.());
+    expect(await screen.findByText(second.email)).toBeInTheDocument();
+    expect(add).toBeEnabled();
+    expect(mocks.grokAccountSwitch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the add action available with no saved accounts and reports login failures", async () => {
+    mocks.grokAccountsList.mockResolvedValue([]);
+    mocks.grokAccountAdd.mockRejectedValue("Login cancelled.");
+    render(<GrokAccountsMenu hideEmail={false} resetTimeRelative />);
+    const add = screen.getByRole("button", { name: "CodexAccountsAddButton" });
+    await waitFor(() => expect(add).toBeEnabled());
+    await act(async () => fireEvent.click(add));
+    expect(screen.getByRole("alert")).toHaveTextContent("Login cancelled.");
+    expect(add).toBeEnabled();
   });
 });

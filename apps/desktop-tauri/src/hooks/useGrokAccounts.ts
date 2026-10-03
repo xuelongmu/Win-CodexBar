@@ -10,6 +10,7 @@ export function useGrokAccounts({ reloadOnFocus = false }: { reloadOnFocus?: boo
   const [accounts, setAccounts] = useState<GrokAccount[]>([]);
   const [usage, setUsage] = useState<Record<string, GrokAccountUsage>>({});
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(false);
   const reloadSequence = useRef(0);
@@ -40,6 +41,8 @@ export function useGrokAccounts({ reloadOnFocus = false }: { reloadOnFocus?: boo
     } catch (value) {
       reportError(value, sequence);
       return false;
+    } finally {
+      if (mounted.current && sequence === reloadSequence.current) setLoading(false);
     }
   }, [reportError]);
 
@@ -82,5 +85,5 @@ export function useGrokAccounts({ reloadOnFocus = false }: { reloadOnFocus?: boo
     [reload, reportError],
   );
 
-  return { accounts, usage, busy, error, reportError, reload, run };
+  return { accounts, usage, busy: busy || loading, error, reportError, reload, run };
 }

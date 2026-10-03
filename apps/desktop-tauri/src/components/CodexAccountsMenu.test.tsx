@@ -98,6 +98,17 @@ describe("CodexAccountsMenu", () => {
     expect(tauriMocks.codexAccountReauthenticate).toHaveBeenCalledOnce();
   });
 
+  it("expands the account list by default and places add account below the rows", async () => {
+    const { container } = renderMenu(false, {
+      accounts: [account("one"), account("two")],
+      accountOrdinals: { one: 1, two: 2 }, snapshots: {},
+    });
+    const row = await screen.findByText("user-two@example.com");
+    expect(container.querySelector("details")?.open).toBe(true);
+    const add = screen.getByRole("button", { name: "CodexAccountsAddButton" });
+    expect(row.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("offers account sign-in with no saved accounts and reports a login failure", async () => {
     renderMenu(false, { accounts: [], accountOrdinals: {}, snapshots: {} });
     const add = await screen.findByRole("button", { name: "CodexAccountsAddButton" });
@@ -129,7 +140,7 @@ describe("CodexAccountsMenu", () => {
       accountOrdinals: { "1": 1, "2": 2 }, snapshots: { "1": both, "2": snapshot(70) },
     });
     await screen.findByText("user-1@example.com");
-    expect(container.querySelector("details")).toBeNull();
+    expect(container.querySelector("details")?.open).toBe(true);
     expect(screen.getByText("35% PanelLeftSuffix")).toBeDefined();
     expect(screen.getByText("7d")).toBeDefined();
     expect(screen.getByText("30% PanelLeftSuffix")).toBeDefined();
