@@ -3802,7 +3802,8 @@ html:has(.menu-surface--tray) {
   flex-shrink: 0;
   font-size: 0.68rem;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 2px 6px;
+  white-space: nowrap;
   border-radius: 5px;
   color: var(--text-primary);
   background: transparent;
@@ -3812,7 +3813,8 @@ html:has(.menu-surface--tray) {
 
 .codex-menu-accounts__row-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   flex-shrink: 0;
   gap: 4px;
 }
