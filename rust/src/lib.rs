@@ -4,9 +4,11 @@
 //! while giving the rewrite a stable crate dependency for future shells.
 
 pub mod agent_sessions;
+pub mod atomic_file;
 pub mod browser;
 pub mod cli;
 pub mod codex_accounts;
+pub mod codex_cli;
 pub mod codex_workspaces;
 pub mod core;
 pub mod cost_scanner;
@@ -14,6 +16,8 @@ pub mod host;
 pub mod locale;
 pub mod logging;
 pub mod login;
+#[cfg(windows)]
+pub mod managed_process;
 pub mod notifications;
 pub mod providers;
 pub mod secure_file;
@@ -26,6 +30,6 @@ pub mod tray;
 pub mod updater;
 pub mod wsl;
 
-mod codex_costs;
+pub mod codex_costs;
 mod codex_sessions;
 mod pi_session_cost;

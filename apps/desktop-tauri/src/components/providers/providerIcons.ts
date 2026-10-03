@@ -10,6 +10,7 @@ import augment from "./icons/ProviderIcon-augment.svg?raw";
 import bedrock from "./icons/ProviderIcon-bedrock.svg?raw";
 import claude from "./icons/ProviderIcon-claude.svg?raw";
 import codebuff from "./icons/ProviderIcon-codebuff.svg?raw";
+import coderabbit from "./icons/ProviderIcon-coderabbit.svg?raw";
 import codex from "./icons/ProviderIcon-codex.svg?raw";
 import commandcode from "./icons/ProviderIcon-commandcode.svg?raw";
 import copilot from "./icons/ProviderIcon-copilot.svg?raw";
@@ -32,16 +33,20 @@ import factory from "./icons/ProviderIcon-factory.svg?raw";
 import gemini from "./icons/ProviderIcon-gemini.svg?raw";
 import grok from "./icons/ProviderIcon-grok.svg?raw";
 import groq from "./icons/ProviderIcon-groq.svg?raw";
+import huggingface from "./icons/ProviderIcon-huggingface.svg?raw";
 import jetbrains from "./icons/ProviderIcon-jetbrains.svg?raw";
 import kilo from "./icons/ProviderIcon-kilo.svg?raw";
 import kimi from "./icons/ProviderIcon-kimi.svg?raw";
 import kiro from "./icons/ProviderIcon-kiro.svg?raw";
 import llmproxy from "./icons/ProviderIcon-llmproxy.svg?raw";
 import manus from "./icons/ProviderIcon-manus.svg?raw";
+import meta from "./icons/ProviderIcon-meta.svg?raw";
 import mimo from "./icons/ProviderIcon-mimo.svg?raw";
 import minimax from "./icons/ProviderIcon-minimax.svg?raw";
 import mistral from "./icons/ProviderIcon-mistral.svg?raw";
+import muse from "./icons/ProviderIcon-muse.svg?raw";
 import notion from "./icons/ProviderIcon-notion.svg?raw";
+import nous from "./icons/ProviderIcon-nous.svg?raw";
 import xai from "./icons/ProviderIcon-xai.svg?raw";
 import ollama from "./icons/ProviderIcon-ollama.svg?raw";
 import opencode from "./icons/ProviderIcon-opencode.svg?raw";
@@ -49,6 +54,7 @@ import opencodego from "./icons/ProviderIcon-opencodego.svg?raw";
 import openrouter from "./icons/ProviderIcon-openrouter.svg?raw";
 import perplexity from "./icons/ProviderIcon-perplexity.svg?raw";
 import qoder from "./icons/ProviderIcon-qoder.svg?raw";
+import replicate from "./icons/ProviderIcon-replicate.svg?raw";
 import sakana from "./icons/ProviderIcon-sakana.svg?raw";
 import stepfun from "./icons/ProviderIcon-stepfun.svg?raw";
 import sub2api from "./icons/ProviderIcon-sub2api.svg?raw";
@@ -92,6 +98,7 @@ const RAW: Record<string, string> = {
   bedrock: tint(bedrock),
   claude: tint(claude),
   codebuff: tint(codebuff),
+  coderabbit: tint(coderabbit),
   codex: tint(codex),
   commandcode: tint(commandcode),
   copilot: tint(copilot),
@@ -114,23 +121,28 @@ const RAW: Record<string, string> = {
   gemini: tint(gemini),
   grok: tint(grok),
   groq: tint(groq),
+  huggingface: tint(huggingface),
   jetbrains: tint(jetbrains),
   kilo: tint(kilo),
   kimi: tint(kimi),
   kiro: tint(kiro),
   llmproxy: tint(llmproxy),
   manus: tint(manus),
+  meta: tint(meta),
   mimo: tint(mimo),
   minimax: tint(minimax),
   notion: tint(notion),
+  nous: tint(nous),
   xai: tint(xai),
   mistral: tint(mistral),
+  muse: tint(muse),
   ollama: tint(ollama),
   opencode: tint(opencode),
   opencodego: tint(opencodego),
   openrouter: tint(openrouter),
   perplexity: tint(perplexity),
   qoder: tint(qoder),
+  replicate: tint(replicate),
   sakana: tint(sakana),
   stepfun: tint(stepfun),
   sub2api: tint(sub2api),
@@ -154,7 +166,9 @@ export const PROVIDER_ICON_REGISTRY: Record<string, ProviderIcon> = {
   antigravity: { id: "antigravity", brandColor: "#60ba7e", fallbackLetter: "◉", svgPath: RAW.antigravity },
   augment:     { id: "augment",     brandColor: "#6366f1", fallbackLetter: "A", svgPath: RAW.augment },
   claude:      { id: "claude",      brandColor: "#cc7c5e", fallbackLetter: "◈", svgPath: RAW.claude },
+  pi:          { id: "pi",          brandColor: "#7c3aed", fallbackLetter: "P" },
   codebuff:    { id: "codebuff",    brandColor: "#44ff00", fallbackLetter: "B", svgPath: RAW.codebuff },
+  coderabbit:  { id: "coderabbit",  brandColor: "#ff5c35", fallbackLetter: "C", svgPath: RAW.coderabbit },
   codex:       { id: "codex",       brandColor: "#49a3b0", fallbackLetter: "◆", svgPath: RAW.codex },
   copilot:     { id: "copilot",     brandColor: "#a855f7", fallbackLetter: "⬡", svgPath: RAW.copilot },
   cursor:      { id: "cursor",      brandColor: "#00bfa5", fallbackLetter: "▸", svgPath: RAW.cursor },
@@ -173,6 +187,10 @@ export const PROVIDER_ICON_REGISTRY: Record<string, ProviderIcon> = {
   gemini:      { id: "gemini",      brandColor: "#ab87ea", fallbackLetter: "✦", svgPath: RAW.gemini },
   grok:        { id: "grok",        brandColor: "#111827", fallbackLetter: "G", svgPath: RAW.grok },
   groq:        { id: "groq",        brandColor: "#f55036", fallbackLetter: "G", svgPath: RAW.groq },
+  huggingface: { id: "huggingface", brandColor: "#ffd21e", fallbackLetter: "H", svgPath: RAW.huggingface },
+  helmcode:    { id: "helmcode",    brandColor: "#4f46e5", fallbackLetter: "H" },
+  v0:          { id: "v0",          brandColor: "#111827", fallbackLetter: "V" },
+  typesafe:    { id: "typesafe",    brandColor: "#2563eb", fallbackLetter: "T" },
   jetbrains:   { id: "jetbrains",   brandColor: "#ff3399", fallbackLetter: "J", svgPath: RAW.jetbrains },
   kilo:        { id: "kilo",        brandColor: "#5d87ff", fallbackLetter: "K", svgPath: RAW.kilo },
   bedrock:     { id: "bedrock",     brandColor: "#ff9900", fallbackLetter: "B", svgPath: RAW.bedrock },
@@ -182,6 +200,7 @@ export const PROVIDER_ICON_REGISTRY: Record<string, ProviderIcon> = {
   llmproxy:    { id: "llmproxy",    brandColor: "#4f46e5", fallbackLetter: "L", svgPath: RAW.llmproxy },
   minimax:     { id: "minimax",     brandColor: "#fe603c", fallbackLetter: "M", svgPath: RAW.minimax },
   mistral:     { id: "mistral",     brandColor: "#ff500f", fallbackLetter: "M", svgPath: RAW.mistral },
+  muse:        { id: "muse",        brandColor: "#0668e1", fallbackLetter: "M", svgPath: RAW.muse },
   ollama:      { id: "ollama",      brandColor: "#8b95b0", fallbackLetter: "○", svgPath: RAW.ollama },
   azureopenai: { id: "azureopenai", brandColor: "#0078d4", fallbackLetter: "A" },
   t3chat:      { id: "t3chat",      brandColor: "#8b5cf6", fallbackLetter: "T", svgPath: RAW.t3chat },
@@ -205,6 +224,7 @@ export const PROVIDER_ICON_REGISTRY: Record<string, ProviderIcon> = {
   crof:        { id: "crof",        brandColor: "#7c3aed", fallbackLetter: "C", svgPath: RAW.crof },
   crossmodel:  { id: "crossmodel",  brandColor: "#c084fc", fallbackLetter: "X", svgPath: RAW.crossmodel },
   qoder:       { id: "qoder",       brandColor: "#2563eb", fallbackLetter: "Q", svgPath: RAW.qoder },
+  replicate:   { id: "replicate",   brandColor: "#000000", fallbackLetter: "R", svgPath: RAW.replicate },
   codebuddy:   { id: "codebuddy",   brandColor: "#0052d9", fallbackLetter: "C" },
   sakana:      { id: "sakana",      brandColor: "#0ea5e9", fallbackLetter: "S", svgPath: RAW.sakana },
   stepfun:     { id: "stepfun",     brandColor: "#999999", fallbackLetter: "S", svgPath: RAW.stepfun },
@@ -218,7 +238,9 @@ export const PROVIDER_ICON_REGISTRY: Record<string, ProviderIcon> = {
   zed:         { id: "zed",         brandColor: "#084ccf", fallbackLetter: "Z" },
   qwencloud:   { id: "qwencloud",   brandColor: "#615CED", fallbackLetter: "Q" },
   notion:      { id: "notion",      brandColor: "#337EA9", fallbackLetter: "N", svgPath: RAW.notion },
+  nous:        { id: "nous",        brandColor: "#D6A55C", fallbackLetter: "N", svgPath: RAW.nous },
   xai:         { id: "xai",         brandColor: "#8e8e93", fallbackLetter: "X", svgPath: RAW.xai },
+  meta:        { id: "meta",        brandColor: "#0467DF", fallbackLetter: "M", svgPath: RAW.meta },
 };
 
 const ALIASES: Record<string, string> = {
@@ -303,6 +325,12 @@ const ALIASES: Record<string, string> = {
   "lite-llm": "litellm",
   "zed ai": "zed",
   "zed-ai": "zed",
+  metaspark: "meta",
+  "meta-spark": "meta",
+  musespark: "meta",
+  "muse-spark": "meta",
+  "muse spark": "meta",
+  "meta muse spark": "meta",
 };
 
 function normalize(id: string): string {

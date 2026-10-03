@@ -7,7 +7,7 @@ import type {
 } from "../types/bridge";
 import { useLocale } from "../hooks/useLocale";
 import { useFormattedResetTime } from "../hooks/useFormattedResetTime";
-import { maskEmail } from "./MenuCard";
+import { buildCodexAccountSurfaceLabels } from "./codexAccountDisplay";
 import {
   codexAccountSwitch,
   getCodexAccountsState,
@@ -37,6 +37,8 @@ export default function CodexAccountsMenu({
   const [snapshots, setSnapshots] = useState<
     Record<string, CodexAccountUsageSnapshot>
   >({});
+  const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
+  const [accountOrdinals, setAccountOrdinals] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +48,8 @@ export default function CodexAccountsMenu({
     try {
       const next: CodexAccountsStateBridge = await getCodexAccountsState();
       setAccounts(next.accounts);
+      setDisplayNames(next.displayNames ?? {});
+      setAccountOrdinals(next.accountOrdinals);
       setSnapshots(next.snapshots);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -92,6 +96,14 @@ export default function CodexAccountsMenu({
     return null;
   }
 
+  const accountDisplayNames = buildCodexAccountSurfaceLabels(
+    accounts,
+    displayNames,
+    accountOrdinals,
+    hideEmail,
+    t("Account"),
+  );
+
   return (
     <details className="codex-menu-accounts" onToggle={onLayoutChange}>
       <summary className="codex-menu-accounts__summary">
@@ -104,17 +116,21 @@ export default function CodexAccountsMenu({
         </div>
       )}
       <ul className="codex-menu-accounts__list">
-        {accounts.map((account) => (
-          <CodexAccountRow
-            key={account.id}
-            account={account}
-            snapshot={snapshots[account.id]}
-            hideEmail={hideEmail}
-            resetTimeRelative={resetTimeRelative}
-            busy={busy}
-            onSwitch={handleSwitch}
-          />
-        ))}
+        {accounts.map((account) => {
+          const label = accountDisplayNames[account.id];
+          return (
+            <CodexAccountRow
+              key={account.id}
+              account={account}
+              snapshot={snapshots[account.id]}
+              displayName={label}
+              tooltip={label}
+              resetTimeRelative={resetTimeRelative}
+              busy={busy}
+              onSwitch={handleSwitch}
+            />
+          );
+        })}
       </ul>
     </details>
   );
@@ -123,14 +139,16 @@ export default function CodexAccountsMenu({
 function CodexAccountRow({
   account,
   snapshot,
-  hideEmail,
+  displayName,
+  tooltip,
   resetTimeRelative,
   busy,
   onSwitch,
 }: {
   account: CodexAccount;
   snapshot: CodexAccountUsageSnapshot | undefined;
-  hideEmail: boolean;
+  displayName: string;
+  tooltip: string;
   resetTimeRelative: boolean;
   busy: boolean;
   onSwitch: (id: string) => Promise<void>;
@@ -153,12 +171,6 @@ function CodexAccountRow({
       : `${t("MetricResetsIn")} ${resetText}`
     : null;
   const windowLabel = formatWindowLabel(usageWindow?.limitWindowSeconds);
-  const label =
-    account.nickname ??
-    account.emailHint ??
-    account.authSubject ??
-    shrink(account.id);
-  const shown = hideEmail ? maskEmail(label) : label;
   const isAmbient = account.source === "ambient";
 
   return (
@@ -167,8 +179,8 @@ function CodexAccountRow({
         className={`codex-menu-accounts__row${isAmbient ? " codex-menu-accounts__row--active" : ""}`}
       >
         <div className="codex-menu-accounts__meta">
-          <span className="codex-menu-accounts__email" title={shown}>
-            {shown}
+          <span className="codex-menu-accounts__email" title={tooltip}>
+            {displayName}
             {isAmbient && (
               <span className="codex-menu-accounts__badge">
                 {t("CodexAccountsSourceAmbient")}
@@ -217,8 +229,4 @@ function formatWindowLabel(
     return `${limitWindowSeconds / 3_600}h`;
   }
   return null;
-}
-
-function shrink(id: string): string {
-  return id.length <= 12 ? id : `${id.slice(0, 8)}…`;
 }

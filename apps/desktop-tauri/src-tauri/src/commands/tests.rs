@@ -8,8 +8,8 @@ use crate::state::AppState;
 use crate::surface::SurfaceMode;
 use crate::surface_target::SurfaceTarget;
 use codexbar::core::{
-    FetchContext, ProviderAccountData, ProviderFetchResult, ProviderId, SourceMode, TokenAccount,
-    instantiate_provider,
+    FetchContext, ProviderAccountData, ProviderDisplayDetail, ProviderError, ProviderFetchResult,
+    ProviderId, ProviderInventoryItem, SourceMode, TokenAccount, instantiate_provider,
 };
 use codexbar::host::session::launch_block_reason;
 use codexbar::settings::{ApiKeys, Language, ManualCookies, Settings};
@@ -50,6 +50,19 @@ fn validate_surface_target_rejects_hidden_mode() {
     let error = validate_surface_target(SurfaceMode::Hidden, SurfaceTarget::Summary).unwrap_err();
 
     assert!(error.contains("only supports visible surfaces"));
+}
+
+#[test]
+fn validate_surface_target_rejects_retired_popout_mode() {
+    for target in [
+        SurfaceTarget::Dashboard,
+        SurfaceTarget::Provider {
+            provider_id: "codex".into(),
+        },
+    ] {
+        let error = validate_surface_target(SurfaceMode::PopOut, target).unwrap_err();
+        assert!(error.contains("popOut surface is retired"));
+    }
 }
 
 #[test]
@@ -230,6 +243,7 @@ fn settings_snapshot_preserves_partial_config_order_for_enabled_providers() {
             .collect::<Vec<_>>(),
         vec!["gemini", "claude", "codex"],
     );
+    assert_eq!(snapshot["trayPanelAlwaysOnTop"], false);
 }
 
 #[test]
@@ -274,6 +288,20 @@ fn minimax_cookie_domain_follows_selected_region() {
     assert_eq!(
         super::provider_cookie_domain(ProviderId::MiniMax, &s),
         Some("platform.minimaxi.com")
+    );
+}
+
+#[test]
+fn replicate_cookie_source_and_domain_are_exposed() {
+    let mut settings = Settings::default();
+    super::provider_cookie_source_set(&mut settings, "replicate", "manual".to_string()).unwrap();
+    assert_eq!(
+        provider_cookie_source_lookup(&settings, "replicate").as_deref(),
+        Some("manual")
+    );
+    assert_eq!(
+        super::provider_cookie_domain(ProviderId::Replicate, &settings),
+        Some("replicate.com")
     );
 }
 
@@ -376,7 +404,7 @@ fn fetch_context_grok_cookie_off_keeps_explicit_cli() {
 }
 
 #[test]
-fn fetch_context_grok_empty_manual_preserves_oauth_without_browser_import() {
+fn fetch_context_grok_empty_manual_preserves_auto_without_browser_import() {
     let mut settings = Settings::default();
     settings.set_cookie_source(ProviderId::Grok, "manual");
     settings.set_usage_source(ProviderId::Grok, "auto");
@@ -388,8 +416,52 @@ fn fetch_context_grok_empty_manual_preserves_oauth_without_browser_import() {
         &HashMap::new(),
     );
 
-    assert_eq!(ctx.source_mode, SourceMode::OAuth);
+    assert_eq!(ctx.source_mode, SourceMode::Auto);
     assert!(ctx.manual_cookie_header.is_none());
+}
+
+#[test]
+fn fetch_context_grok_manual_cookie_keeps_auto_for_switched_login() {
+    let mut settings = Settings::default();
+    settings.set_cookie_source(ProviderId::Grok, "manual");
+    settings.set_usage_source(ProviderId::Grok, "auto");
+    let mut cookies = ManualCookies::default();
+    cookies.set("grok", "sso=other-account");
+    let ctx = super::build_fetch_context(
+        ProviderId::Grok,
+        &settings,
+        &cookies,
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Auto);
+    assert_eq!(
+        ctx.manual_cookie_header.as_deref(),
+        Some("sso=other-account")
+    );
+}
+
+#[test]
+fn fetch_context_grok_explicit_web_still_uses_manual_cookie() {
+    let mut settings = Settings::default();
+    settings.set_cookie_source(ProviderId::Grok, "manual");
+    settings.set_usage_source(ProviderId::Grok, "web");
+    let mut cookies = ManualCookies::default();
+    cookies.set("grok", "sso=browser-account");
+    let ctx = super::build_fetch_context(
+        ProviderId::Grok,
+        &settings,
+        &cookies,
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Web);
+    assert_eq!(
+        ctx.manual_cookie_header.as_deref(),
+        Some("sso=browser-account")
+    );
 }
 
 #[test]
@@ -411,6 +483,68 @@ fn fetch_context_opencode_empty_manual_remaps_to_web() {
 }
 
 #[test]
+fn fetch_context_replicate_empty_manual_fails_closed_without_browser_import() {
+    let settings = Settings::default();
+    let ctx = super::build_fetch_context(
+        ProviderId::Replicate,
+        &settings,
+        &ManualCookies::default(),
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Web);
+    assert!(ctx.manual_cookie_header.is_none());
+    assert!(ctx.manual_cookie_missing);
+}
+
+#[test]
+fn fetch_context_codex_manual_cookie_never_forces_unsupported_web() {
+    // Default cookie source is "manual". Pasting a chatgpt.com cookie used to flip
+    // Codex into SourceMode::Web, which CodexProvider rejects with
+    // "Source mode 'Web' not supported for this provider" on every refresh.
+    let settings = Settings::default();
+    let mut cookies = ManualCookies::default();
+    cookies.set(
+        ProviderId::Codex.cli_name(),
+        "oai-did=abc; __Secure-next-auth.session-token=xyz",
+    );
+
+    let ctx = super::build_fetch_context(
+        ProviderId::Codex,
+        &settings,
+        &cookies,
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Auto);
+    assert!(
+        instantiate_provider(ProviderId::Codex)
+            .available_sources()
+            .contains(&ctx.source_mode)
+    );
+}
+
+#[test]
+fn fetch_context_codex_manual_cookie_keeps_explicit_supported_source() {
+    let mut settings = Settings::default();
+    settings.set_usage_source(ProviderId::Codex, "oauth");
+    let mut cookies = ManualCookies::default();
+    cookies.set(ProviderId::Codex.cli_name(), "oai-did=abc");
+
+    let ctx = super::build_fetch_context(
+        ProviderId::Codex,
+        &settings,
+        &cookies,
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::OAuth);
+}
+
+#[test]
 fn fetch_context_claude_uses_oauth_without_manual_cookie() {
     let settings = Settings::default();
     let cookies = ManualCookies::default();
@@ -426,6 +560,24 @@ fn fetch_context_claude_uses_oauth_without_manual_cookie() {
     );
 
     assert_eq!(ctx.source_mode, SourceMode::OAuth);
+    assert!(ctx.manual_cookie_header.is_none());
+}
+
+#[test]
+fn fetch_context_claude_web_source_defers_cookie_resolution_to_provider() {
+    let mut settings = Settings::default();
+    settings.set_cookie_source(ProviderId::Claude, "browser");
+    settings.set_usage_source(ProviderId::Claude, "web");
+
+    let ctx = super::build_fetch_context(
+        ProviderId::Claude,
+        &settings,
+        &ManualCookies::default(),
+        &ApiKeys::default(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Web);
     assert!(ctx.manual_cookie_header.is_none());
 }
 
@@ -573,6 +725,34 @@ fn fetch_context_token_account_uses_web_cookie_header() {
     assert_eq!(
         ctx.manual_cookie_header.as_deref(),
         Some("__Secure-session=abc123")
+    );
+}
+
+#[test]
+fn fetch_context_claude_manual_cookie_beats_active_oauth_token_account() {
+    let mut settings = Settings::default();
+    settings.set_cookie_source(ProviderId::Claude, "manual");
+    settings.set_usage_source(ProviderId::Claude, "auto");
+    let mut cookies = ManualCookies::default();
+    cookies.set("claude", "sessionKey=manual-session");
+    let api_keys = ApiKeys::default();
+    let mut token_accounts = HashMap::new();
+    let mut data = ProviderAccountData::new();
+    data.add_account(TokenAccount::new("Claude OAuth", "[REDACTED_SECRET]"));
+    token_accounts.insert(ProviderId::Claude, data);
+
+    let ctx = super::build_fetch_context(
+        ProviderId::Claude,
+        &settings,
+        &cookies,
+        &api_keys,
+        &token_accounts,
+    );
+
+    assert_eq!(ctx.source_mode, SourceMode::Web);
+    assert_eq!(
+        ctx.manual_cookie_header.as_deref(),
+        Some("sessionKey=manual-session")
     );
 }
 
@@ -741,7 +921,7 @@ fn launch_block_reason_helper_prefers_ssh() {
 
 #[test]
 fn build_provider_detail_populates_identity_urls() {
-    let detail = super::build_provider_detail("claude").expect("known provider");
+    let (detail, _settings, _id) = super::build_provider_detail("claude").expect("known provider");
     assert_eq!(detail.id, "claude");
     assert_eq!(detail.display_name, "Claude");
     // Claude advertises a status page URL in its metadata.
@@ -760,7 +940,7 @@ fn build_provider_detail_rejects_unknown_provider() {
 
 #[test]
 fn provider_detail_roundtrips_through_serde() {
-    let detail = super::build_provider_detail("codex").expect("known provider");
+    let (detail, _settings, _id) = super::build_provider_detail("codex").expect("known provider");
     let json = serde_json::to_string(&detail).expect("serialize");
     // camelCase rename survives the round-trip.
     assert!(json.contains("\"displayName\""));
@@ -769,20 +949,158 @@ fn provider_detail_roundtrips_through_serde() {
 }
 
 #[test]
+fn usage_item_descriptors_keep_raw_ids_and_redact_titles() {
+    let metadata = instantiate_provider(ProviderId::Codex).metadata().clone();
+    let result = ProviderFetchResult {
+        usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(10.0)),
+        cost: None,
+        wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
+        source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
+    };
+    let mut snapshot =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::Codex, &metadata, &result, None);
+    snapshot.primary_label = Some("Account owner@example.com".to_string());
+    snapshot.extra_rate_windows = vec![NamedRateWindowSnapshot {
+        id: "credits".to_string(),
+        title: "Credits owner@example.com".to_string(),
+        window: snapshot.primary.clone(),
+        fallback_lane: false,
+    }];
+
+    let mut settings = Settings {
+        hide_personal_info: true,
+        ..Settings::default()
+    };
+    settings.set_hidden_usage_item_ids(ProviderId::Codex, vec!["metric:extra-missing".to_string()]);
+
+    let items = super::usage_item_descriptors(Some(&snapshot), &settings, ProviderId::Codex);
+
+    assert_eq!(items[0].id, "metric:primary");
+    assert_eq!(items[0].title, "Account Hidden");
+    assert_eq!(items[1].id, "metric:extra-credits");
+    assert_eq!(items[1].title, "Credits Hidden");
+    assert_eq!(items[2].id, "metric:extra-missing");
+    assert!(!items[2].available);
+}
+
+#[test]
 fn pace_stage_serializes_to_snake_case_string() {
     use codexbar::core::PaceStage;
-    assert_eq!(super::pace_stage_str(PaceStage::OnTrack), "on_track");
     assert_eq!(
-        super::pace_stage_str(PaceStage::SlightlyAhead),
+        super::bridge::pace::stage_str(PaceStage::OnTrack),
+        "on_track"
+    );
+    assert_eq!(
+        super::bridge::pace::stage_str(PaceStage::SlightlyAhead),
         "slightly_ahead"
     );
-    assert_eq!(super::pace_stage_str(PaceStage::FarAhead), "far_ahead");
     assert_eq!(
-        super::pace_stage_str(PaceStage::SlightlyBehind),
+        super::bridge::pace::stage_str(PaceStage::FarAhead),
+        "far_ahead"
+    );
+    assert_eq!(
+        super::bridge::pace::stage_str(PaceStage::SlightlyBehind),
         "slightly_behind"
     );
-    assert_eq!(super::pace_stage_str(PaceStage::Behind), "behind");
-    assert_eq!(super::pace_stage_str(PaceStage::FarBehind), "far_behind");
+    assert_eq!(super::bridge::pace::stage_str(PaceStage::Behind), "behind");
+    assert_eq!(
+        super::bridge::pace::stage_str(PaceStage::FarBehind),
+        "far_behind"
+    );
+}
+
+#[test]
+fn local_opencodego_estimates_keep_quota_windows_but_drop_derived_pace() {
+    let now = chrono::Utc::now();
+    let usage = codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::with_details(
+        12.0,
+        Some(300),
+        Some(now + chrono::Duration::hours(2)),
+        None,
+    ))
+    .with_secondary(codexbar::core::RateWindow::with_details(
+        23.0,
+        Some(10080),
+        Some(now + chrono::Duration::days(3)),
+        None,
+    ))
+    .with_tertiary(codexbar::core::RateWindow::with_details(
+        34.0,
+        Some(43200),
+        Some(now + chrono::Duration::days(10)),
+        None,
+    ));
+    let result = ProviderFetchResult::new(
+        usage,
+        codexbar::providers::opencodego::LOCAL_ESTIMATE_SOURCE_LABEL,
+    )
+    .with_non_authoritative_pace();
+    let metadata = instantiate_provider(ProviderId::OpenCodeGo)
+        .metadata()
+        .clone();
+    let snapshot =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::OpenCodeGo, &metadata, &result, None);
+
+    assert_eq!(snapshot.source_label, "local estimate");
+    assert_eq!(snapshot.primary.used_percent, 12.0);
+    assert_eq!(snapshot.secondary.as_ref().unwrap().used_percent, 23.0);
+    assert_eq!(snapshot.tertiary.as_ref().unwrap().used_percent, 34.0);
+    assert!(snapshot.primary.resets_at.is_some());
+    assert!(snapshot.secondary.as_ref().unwrap().resets_at.is_some());
+    assert!(snapshot.tertiary.as_ref().unwrap().resets_at.is_some());
+    assert!(snapshot.pace.is_none());
+    assert!(
+        snapshot
+            .secondary
+            .as_ref()
+            .unwrap()
+            .reserve_percent
+            .is_none()
+    );
+}
+
+#[test]
+fn provider_inventory_maps_to_the_bridge_without_token_ids() {
+    let expiry = chrono::DateTime::<chrono::Utc>::from_timestamp(1_900_000_000, 0).unwrap();
+    let result = ProviderFetchResult::new(
+        codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(12.0)),
+        "web",
+    )
+    .with_inventory_item(ProviderInventoryItem {
+        id: "reset-credits".to_string(),
+        title: "Limit Reset Credits".to_string(),
+        available_count: 2,
+        next_expires_at: Some(expiry),
+    })
+    .with_display_detail(
+        ProviderDisplayDetail::new("credits", "Used this cycle", "12")
+            .and_then(|row| row.with_secondary_value("Monthly refill: 100"))
+            .and_then(|row| row.with_progress(12.0, 100.0)),
+    );
+    let metadata = instantiate_provider(ProviderId::Grok).metadata().clone();
+    let snapshot =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::Grok, &metadata, &result, None);
+
+    assert_eq!(snapshot.inventory.len(), 1);
+    assert_eq!(snapshot.inventory[0].available_count, 2);
+    assert_eq!(
+        snapshot.inventory[0].next_expires_at.as_deref(),
+        Some("2030-03-17T17:46:40+00:00")
+    );
+    assert_eq!(snapshot.display_details.len(), 1);
+    assert_eq!(snapshot.display_details[0].value, "12");
+    assert_eq!(
+        snapshot.display_details[0].secondary_value.as_deref(),
+        Some("Monthly refill: 100")
+    );
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    assert!(serialized.contains("reset-credits"));
+    assert!(!serialized.contains("coupon-token-secret"));
 }
 
 #[test]
@@ -861,7 +1179,12 @@ fn provider_cache_upsert_replaces_existing_provider() {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(10.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "CLI".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let mut first =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Codex, &metadata, &result, None);
@@ -884,7 +1207,12 @@ fn provider_cache_prunes_disabled_providers() {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(10.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "CLI".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let codex =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Codex, &metadata, &result, None);
@@ -908,59 +1236,73 @@ fn superseded_refresh_generation_is_not_current() {
 }
 
 #[test]
-fn hiding_codex_spark_rows_preserves_other_extra_usage() {
-    let metadata = instantiate_provider(ProviderId::Codex).metadata().clone();
-    let result = ProviderFetchResult {
-        usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(10.0)),
-        cost: None,
-        wayfinder_usage: None,
-        source_label: "CLI".to_string(),
-    };
-    let mut snapshot =
-        ProviderUsageSnapshot::from_fetch_result(ProviderId::Codex, &metadata, &result, None);
-    snapshot.extra_rate_windows = vec![
-        NamedRateWindowSnapshot {
-            id: "codex-spark".to_string(),
-            title: "Codex Spark 5-hour".to_string(),
-            window: snapshot.primary.clone(),
-        },
-        NamedRateWindowSnapshot {
-            id: "credits".to_string(),
-            title: "Credits".to_string(),
-            window: snapshot.primary.clone(),
-        },
-    ];
 
-    super::filter_hidden_codex_spark_rows(&mut snapshot, false);
-
-    assert_eq!(snapshot.extra_rate_windows.len(), 1);
-    assert_eq!(snapshot.extra_rate_windows[0].id, "credits");
-}
-
-#[test]
 fn claude_transient_auth_failure_preserves_first_last_good_snapshot() {
     let metadata = instantiate_provider(ProviderId::Claude).metadata().clone();
     let result = ProviderFetchResult {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(42.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let good =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
-    let error = ProviderUsageSnapshot::from_error(
+    let snapshot = ProviderUsageSnapshot::from_error(
         ProviderId::Claude,
         &metadata,
         "Unauthorized".to_string(),
         codexbar::core::ProviderStateKind::NeedsAuthentication,
     );
+    let error = ProviderError::AuthRequired;
     let mut state = crate::state::AppState::new();
     state.provider_cache.push(good.clone());
 
     let preserved = super::providers::preserve_last_good_transient_failure(
         &mut state,
         ProviderId::Claude,
-        error,
+        snapshot,
+        &error,
+    );
+
+    assert_eq!(preserved.error, None);
+    assert_eq!(preserved.primary.used_percent, 42.0);
+}
+
+#[test]
+fn codex_transient_transport_failure_helper_uses_typed_policy() {
+    let metadata = instantiate_provider(ProviderId::Codex).metadata().clone();
+    let result = ProviderFetchResult {
+        usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(42.0)),
+        cost: None,
+        wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
+        source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
+    };
+    let good =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::Codex, &metadata, &result, None);
+    let snapshot = ProviderUsageSnapshot::from_error(
+        ProviderId::Codex,
+        &metadata,
+        "Timeout".to_string(),
+        codexbar::core::ProviderStateKind::Unknown,
+    );
+    let mut state = crate::state::AppState::new();
+    state.provider_cache.push(good);
+
+    let preserved = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Codex,
+        snapshot,
+        &ProviderError::Timeout,
     );
 
     assert_eq!(preserved.error, None);
@@ -974,7 +1316,12 @@ fn claude_repeated_auth_failure_surfaces_error() {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(42.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let good =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
@@ -985,6 +1332,7 @@ fn claude_repeated_auth_failure_surfaces_error() {
         codexbar::core::ProviderStateKind::NeedsAuthentication,
     );
     let second_error = first_error.clone();
+    let failure = ProviderError::AuthRequired;
     let mut state = crate::state::AppState::new();
     state.provider_cache.push(good);
 
@@ -992,14 +1340,121 @@ fn claude_repeated_auth_failure_surfaces_error() {
         &mut state,
         ProviderId::Claude,
         first_error,
+        &failure,
     );
     let surfaced = super::providers::preserve_last_good_transient_failure(
         &mut state,
         ProviderId::Claude,
         second_error,
+        &failure,
     );
 
     assert!(surfaced.error.is_some());
+}
+
+#[test]
+fn claude_cloudflare_challenge_retains_prior_usage_while_surfaceing_guidance() {
+    let metadata = instantiate_provider(ProviderId::Claude).metadata().clone();
+    let result = ProviderFetchResult {
+        usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(42.0)),
+        cost: None,
+        wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
+        source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
+    };
+    let good =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
+    let challenge = codexbar::providers::claude::CLOUDFLARE_CHALLENGE_MESSAGE;
+    let error = ProviderUsageSnapshot::from_error(
+        ProviderId::Claude,
+        &metadata,
+        challenge.to_string(),
+        codexbar::core::ProviderStateKind::Unknown,
+    );
+    let failure = ProviderError::Other(challenge.to_string());
+    let mut state = crate::state::AppState::new();
+    state.provider_cache.push(good);
+
+    let surfaced = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Claude,
+        error,
+        &failure,
+    );
+
+    assert_eq!(surfaced.error, None);
+    assert_eq!(surfaced.primary.used_percent, 42.0);
+    assert_eq!(
+        super::providers::preserve_last_good_transient_failure(
+            &mut state,
+            ProviderId::Claude,
+            ProviderUsageSnapshot::from_error(
+                ProviderId::Claude,
+                &metadata,
+                challenge.to_string(),
+                codexbar::core::ProviderStateKind::Unknown,
+            ),
+            &failure,
+        )
+        .error
+        .as_deref(),
+        Some(challenge)
+    );
+}
+
+#[test]
+fn claude_cloudflare_challenge_keeps_prior_usage_when_guidance_surfaces() {
+    let metadata = instantiate_provider(ProviderId::Claude).metadata().clone();
+    let result = ProviderFetchResult {
+        usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(42.0)),
+        cost: None,
+        wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
+        source_label: "Web".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
+    };
+    let mut good =
+        ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
+    good.updated_at = "2026-09-01T00:00:00Z".to_string();
+    let error = ProviderUsageSnapshot::from_error(
+        ProviderId::Claude,
+        &metadata,
+        codexbar::providers::claude::CLOUDFLARE_CHALLENGE_MESSAGE.to_string(),
+        codexbar::core::ProviderStateKind::Unknown,
+    );
+    let failure =
+        ProviderError::Other(codexbar::providers::claude::CLOUDFLARE_CHALLENGE_MESSAGE.to_string());
+    let mut state = crate::state::AppState::new();
+    state.provider_cache.push(good.clone());
+
+    let first = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Claude,
+        error.clone(),
+        &failure,
+    );
+    let second = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Claude,
+        error,
+        &failure,
+    );
+
+    assert_eq!(first.error, None);
+    assert_eq!(first.primary.used_percent, 42.0);
+    assert_eq!(
+        second.error.as_deref(),
+        Some(codexbar::providers::claude::CLOUDFLARE_CHALLENGE_MESSAGE,)
+    );
+    assert_eq!(second.primary.used_percent, 42.0);
+    assert_eq!(second.updated_at, good.updated_at);
 }
 
 #[test]
@@ -1009,7 +1464,12 @@ fn claude_cli_parse_failure_keeps_last_good_every_time() {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(17.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "CLI".to_string(),
+        has_successful_claude_cli_quota: true,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let good =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
@@ -1019,6 +1479,7 @@ fn claude_cli_parse_failure_keeps_last_good_every_time() {
         "Parse error: Empty output from Claude CLI".to_string(),
         codexbar::core::ProviderStateKind::Unknown,
     );
+    let failure = ProviderError::Parse("Empty output from Claude CLI".to_string());
     let mut state = crate::state::AppState::new();
     state.provider_cache.push(good.clone());
 
@@ -1026,12 +1487,18 @@ fn claude_cli_parse_failure_keeps_last_good_every_time() {
         &mut state,
         ProviderId::Claude,
         err.clone(),
+        &failure,
     );
-    let second =
-        super::providers::preserve_last_good_transient_failure(&mut state, ProviderId::Claude, err);
+    let second = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Claude,
+        err,
+        &failure,
+    );
 
     assert_eq!(first.error, None);
     assert_eq!(first.primary.used_percent, 17.0);
+    assert!(!first.has_successful_claude_cli_quota);
     // Parse failures keep last-good on every refresh (upstream #2247), unlike one-shot auth.
     assert_eq!(second.error, None);
     assert_eq!(second.primary.used_percent, 17.0);
@@ -1044,7 +1511,12 @@ fn claude_hard_credentials_missing_does_not_preserve_stale() {
         usage: codexbar::core::UsageSnapshot::new(codexbar::core::RateWindow::new(17.0)),
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
     let good =
         ProviderUsageSnapshot::from_fetch_result(ProviderId::Claude, &metadata, &result, None);
@@ -1055,11 +1527,18 @@ fn claude_hard_credentials_missing_does_not_preserve_stale() {
             .to_string(),
         codexbar::core::ProviderStateKind::NeedsAuthentication,
     );
+    let failure = ProviderError::OAuth(
+        "Claude OAuth credentials not found. Run `claude` to authenticate.".to_string(),
+    );
     let mut state = crate::state::AppState::new();
     state.provider_cache.push(good);
 
-    let out =
-        super::providers::preserve_last_good_transient_failure(&mut state, ProviderId::Claude, err);
+    let out = super::providers::preserve_last_good_transient_failure(
+        &mut state,
+        ProviderId::Claude,
+        err,
+        &failure,
+    );
     assert!(out.error.is_some());
     assert_eq!(
         out.error_state,
@@ -1094,6 +1573,16 @@ fn claude_error_message_explains_missing_sign_in() {
 }
 
 #[test]
+fn claude_cloudflare_error_preserves_distinct_recovery_guidance() {
+    let challenge = codexbar::providers::claude::CLOUDFLARE_CHALLENGE_MESSAGE;
+    let message = super::friendly_provider_error(ProviderId::Claude, challenge);
+
+    assert_eq!(message, challenge);
+    assert!(message.contains("OAuth"));
+    assert!(message.contains("different network"));
+}
+
+#[test]
 fn non_claude_error_message_is_preserved() {
     let message = super::friendly_provider_error(
         ProviderId::Codex,
@@ -1109,7 +1598,8 @@ fn non_claude_error_message_is_preserved() {
 #[test]
 fn chart_data_serde_roundtrip_preserves_fields() {
     use super::{
-        DailyCostPoint, DailyTokenPoint, DailyUsageBreakdown, ProviderChartData, ServiceUsagePoint,
+        DailyCostPoint, DailyTokenPoint, DailyUsageBreakdown, ProviderChartData,
+        QuotaWindowHistoryBridge, QuotaWindowHistoryPoint, ServiceUsagePoint,
     };
 
     let original = ProviderChartData {
@@ -1117,16 +1607,16 @@ fn chart_data_serde_roundtrip_preserves_fields() {
         cost_history: vec![
             DailyCostPoint {
                 date: "2025-01-01".into(),
-                value: 1.25,
+                value: Some(1.25),
             },
             DailyCostPoint {
                 date: "2025-01-02".into(),
-                value: 0.0,
+                value: Some(0.0),
             },
         ],
         credits_history: vec![DailyCostPoint {
             date: "2025-01-01".into(),
-            value: 42.0,
+            value: Some(42.0),
         }],
         usage_breakdown: vec![DailyUsageBreakdown {
             day: "2025-01-01".into(),
@@ -1148,6 +1638,22 @@ fn chart_data_serde_roundtrip_preserves_fields() {
             tokens: 123_456,
         }],
         tokens_incomplete: true,
+        quota_window_history: Some(QuotaWindowHistoryBridge {
+            provider_id: "codex".into(),
+            account_scope: Some("person@example.com".into()),
+            windows: vec![QuotaWindowHistoryPoint {
+                offset: 0,
+                start: "2025-01-01T00:00:00Z".into(),
+                end: "2025-01-08T00:00:00Z".into(),
+                total_tokens: Some(123_456),
+                total_cost_usd: None,
+                tokens_are_complete: true,
+                cost_is_complete: false,
+                entry_count: 2,
+                boundaries_are_estimated: true,
+            }],
+            history_coverage_established: false,
+        }),
     };
 
     let json = serde_json::to_string(&original).expect("serialize");
@@ -1169,11 +1675,26 @@ fn chart_data_serde_roundtrip_preserves_fields() {
     assert_eq!(back.provider_id, "codex");
     assert_eq!(back.cost_history.len(), 2);
     assert_eq!(back.cost_history[0].date, "2025-01-01");
-    assert_eq!(back.credits_history[0].value, 42.0);
+    assert_eq!(back.credits_history[0].value, Some(42.0));
     assert_eq!(back.usage_breakdown[0].services.len(), 2);
     assert_eq!(back.usage_breakdown[0].total_credits_used, 13.5);
     assert_eq!(back.tokens_history[0].tokens, 123_456);
     assert!(back.tokens_incomplete);
+    let history = back.quota_window_history.expect("quota history");
+    assert_eq!(history.account_scope.as_deref(), Some("person@example.com"));
+    assert_eq!(history.windows[0].offset, 0);
+    assert!(history.windows[0].boundaries_are_estimated);
+    assert!(!history.windows[0].cost_is_complete);
+    assert!(!history.history_coverage_established);
+
+    let mut legacy = serde_json::to_value(&original).expect("serialize legacy fixture");
+    legacy
+        .as_object_mut()
+        .expect("chart object")
+        .remove("quotaWindowHistory");
+    let legacy_back: ProviderChartData =
+        serde_json::from_value(legacy).expect("legacy chart payload remains readable");
+    assert!(legacy_back.quota_window_history.is_none());
 }
 
 #[test]
@@ -1194,7 +1715,12 @@ fn japanese_provider_snapshot_localizes_weekly_label() {
         usage,
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
 
     let snapshot =
@@ -1223,7 +1749,12 @@ fn japanese_provider_snapshot_localizes_pace_reserve_description() {
         usage,
         cost: None,
         wayfinder_usage: None,
+        inventory: Vec::new(),
+        display_details: Vec::new(),
         source_label: "OAuth".to_string(),
+        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
+        account_identity: None,
     };
 
     let snapshot =
@@ -1238,10 +1769,10 @@ fn japanese_provider_snapshot_localizes_pace_reserve_description() {
 
 #[test]
 fn chart_data_requires_account_email_for_codex() {
-    let data = super::build_provider_chart_data("codex".into(), None);
-    assert_eq!(data.provider_id, "codex");
-    assert!(data.credits_history.is_empty());
-    assert!(data.usage_breakdown.is_empty());
+    let (credits_history, usage_breakdown) =
+        super::chart::load_openai_dashboard_chart_data_for_test("codex", None);
+    assert!(credits_history.is_empty());
+    assert!(usage_breakdown.is_empty());
 }
 
 #[test]
@@ -1252,6 +1783,13 @@ fn cookie_options_for_cookie_supporting_provider() {
     assert!(opts.iter().any(|o| o.label == "Automatic"));
     assert!(opts.iter().any(|o| o.label == "Manual"));
     assert!(opts.iter().any(|o| o.label == "Disabled"));
+}
+
+#[test]
+fn replicate_cookie_options_allow_automatic_and_manual_sessions() {
+    let opts = super::cookie_source_options_for("replicate", Language::English);
+    let values: Vec<_> = opts.iter().map(|option| option.value.as_str()).collect();
+    assert_eq!(values, vec!["auto", "manual"]);
 }
 
 #[test]

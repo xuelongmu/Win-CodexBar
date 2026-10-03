@@ -222,6 +222,17 @@ impl ModelsDevPricingSnapshot {
             .as_ref()
             .and_then(|artifact| artifact.catalog.lookup(provider_id, model_id))
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_catalog_json_for_tests(json: &str) -> Option<Self> {
+        let catalog = ModelsDevCatalog::decode(json)?;
+        Some(Self {
+            artifact: Some(Arc::new(ModelsDevCacheArtifact::new(
+                catalog,
+                SystemTime::now(),
+            ))),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -641,10 +652,7 @@ impl ModelsDevCache {
         let Ok(contents) = serde_json::to_vec(&*artifact) else {
             return false;
         };
-        let Ok(mut file) = std::fs::File::create(&cache_path) else {
-            return false;
-        };
-        if std::io::Write::write_all(&mut file, &contents).is_err() {
+        if crate::atomic_file::write_atomic(&cache_path, &contents).is_err() {
             return false;
         }
         let (modified_at, size) = file_identity(&cache_path);
@@ -660,6 +668,28 @@ impl ModelsDevCache {
                 },
             );
         true
+    }
+}
+
+#[cfg(test)]
+mod models_dev_cache_atomic_tests {
+    use super::ModelsDevCache;
+    use tempfile::tempdir;
+
+    #[test]
+    fn failed_staged_replacement_preserves_previous_cache() {
+        let root = tempdir().unwrap();
+        let cache_path = ModelsDevCache::cache_path(Some(root.path()));
+        let parent = cache_path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+
+        crate::atomic_file::write_atomic(&cache_path, b"old-cache").unwrap();
+
+        let staged = parent.join("failed-staged-replacement");
+        std::fs::create_dir(&staged).unwrap();
+
+        assert!(crate::atomic_file::replace_staged(&staged, &cache_path).is_err());
+        assert_eq!(std::fs::read(cache_path).unwrap(), b"old-cache");
     }
 }
 

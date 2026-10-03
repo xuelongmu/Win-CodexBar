@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 mod auto_refresh;
+mod auto_resume;
 mod coding_activity;
 mod commands;
 mod events;
@@ -15,6 +16,7 @@ mod shortcut_bridge;
 mod state;
 mod surface;
 mod surface_target;
+mod tray_accounts;
 mod tray_bridge;
 mod tray_menu;
 mod tray_visibility;
@@ -25,7 +27,6 @@ use std::sync::Mutex;
 
 use state::AppState;
 use surface::SurfaceMode;
-use surface_target::SurfaceTarget;
 use tauri::Manager;
 
 const PROOF_ACTIVATION_DELAY: Duration = Duration::from_millis(0);
@@ -44,12 +45,22 @@ fn should_hide_close_request(mode: SurfaceMode) -> bool {
     )
 }
 
-fn primary_window_request() -> shell::ShellTransitionRequest {
-    shell::ShellTransitionRequest {
-        mode: SurfaceMode::PopOut,
-        target: SurfaceTarget::Dashboard,
-        position: None,
-    }
+/// Open the primary window: the tray-panel flyout, the only dashboard
+/// layout. The legacy PopOut layout on `main` is retired, so launches and
+/// relaunches land on the same panel as a tray left-click.
+///
+/// Spawned because building the flyout window synchronously can deadlock on
+/// Windows (see `shell::flyout_window::open_or_focus`).
+fn open_primary_window(app: &tauri::AppHandle, delay: Duration) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if let Err(error) = shell::flyout_window::open_or_focus(&app, None) {
+            tracing::warn!(%error, "failed to open the tray panel window");
+        }
+    });
 }
 
 fn should_open_primary_window_from_args<I, S>(args: I) -> bool
@@ -148,9 +159,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if should_reopen_primary_window_from_instance_args(args.iter().skip(1)) {
-                let request = primary_window_request();
-                let _ =
-                    shell::reopen_to_target(app, request.mode, request.target, request.position);
+                open_primary_window(app, Duration::ZERO);
             }
         }))
         .invoke_handler(tauri::generate_handler![
@@ -177,12 +186,24 @@ fn main() {
             commands::get_deepseek_pricing_status,
             commands::codex_accounts_list,
             commands::claude_accounts_list,
+            commands::claude_reconciliation_state,
             commands::claude_account_add,
             commands::claude_account_cancel_login,
             commands::claude_account_save_current,
             commands::claude_account_remove,
             commands::claude_account_switch,
+            commands::grok_accounts_list,
+            commands::grok_account_add,
+            commands::grok_account_cancel_login,
+            commands::grok_account_save_current,
+            commands::grok_account_remove,
+            commands::grok_account_switch,
+            commands::grok_account_fetch,
+            commands::claude_swap_accounts_list,
+            commands::claude_swap_account_switch,
+            commands::claude_swap_account_reauthenticate,
             commands::codex_account_add,
+            commands::codex_account_reauthenticate,
             commands::codex_account_remove,
             commands::codex_account_switch,
             commands::codex_account_fetch,
@@ -221,9 +242,12 @@ fn main() {
             commands::reorder_providers,
             commands::set_provider_cookie_source,
             commands::set_provider_usage_source,
+            commands::set_provider_auto_resume_after_quota_reset,
             commands::has_openrouter_management_api_key,
             commands::set_openrouter_management_api_key,
             commands::remove_openrouter_management_api_key,
+            commands::get_provider_azure_api_version,
+            commands::set_provider_azure_api_version,
             commands::get_provider_cookie_source_options,
             commands::set_provider_region,
             commands::get_provider_region_options,
@@ -285,17 +309,10 @@ fn main() {
                     proof_harness::activate(&app_handle);
                 });
             } else if launch.open_primary_window_at_start {
-                let app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(VISIBLE_START_ACTIVATION_DELAY).await;
-                    let request = primary_window_request();
-                    let _ = shell::reopen_to_target(
-                        &app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
-                });
+                if launch.suppress_blur_dismiss {
+                    shell::flyout_window::keep_open_on_blur();
+                }
+                open_primary_window(app.handle(), VISIBLE_START_ACTIVATION_DELAY);
             }
 
             Ok(())
@@ -416,14 +433,6 @@ mod tests {
     #[test]
     fn close_request_leaves_hidden_surface_alone() {
         assert!(!should_hide_close_request(SurfaceMode::Hidden));
-    }
-
-    #[test]
-    fn primary_window_request_targets_popout_dashboard() {
-        let request = primary_window_request();
-        assert_eq!(request.mode, SurfaceMode::PopOut);
-        assert_eq!(request.target, SurfaceTarget::Dashboard);
-        assert_eq!(request.position, None);
     }
 
     #[test]

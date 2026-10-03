@@ -61,12 +61,14 @@ fn validate_serve_args_accepts_loopback_without_token() {
         host: "localhost".into(),
         refresh_interval: 60,
         dashboard_token: None,
+        metrics: false,
         allow_plain_http: false,
         identity: Some("redacted".into()),
     })
     .unwrap();
     assert_eq!(config.host, "127.0.0.1");
     assert!(config.token_digest.is_none());
+    assert!(!config.metrics_enabled);
 }
 
 #[test]
@@ -76,6 +78,7 @@ fn validate_serve_args_rejects_lan_without_token() {
         host: "0.0.0.0".into(),
         refresh_interval: 60,
         dashboard_token: None,
+        metrics: false,
         allow_plain_http: true,
         identity: Some("redacted".into()),
     })
@@ -91,6 +94,7 @@ fn validate_serve_args_rejects_lan_without_allow_plain_http() {
         host: "192.168.0.2".into(),
         refresh_interval: 60,
         dashboard_token: Some("tok".into()),
+        metrics: true,
         allow_plain_http: false,
         identity: Some("redacted".into()),
     })
@@ -153,6 +157,7 @@ fn head_test_config(budget: Duration, token: Option<&str>) -> ServeConfig {
         host: "127.0.0.1".to_string(),
         port: 8080,
         token_digest: token.map(|t| sha256_digest(t.as_bytes())),
+        metrics_enabled: false,
         head_read_budget: budget,
         identity: Some(DashboardIdentity::Redacted),
         dashboard: None,
@@ -469,24 +474,38 @@ async fn over_cap_connection_closes_immediately_without_response() {
     );
 
     // Ending the tricklers releases their permits via EOF; a normal client
-    // must then be served (strict outer timeout).
+    // must then be served (strict outer timeout). Permit release races the
+    // server's graceful close-drain window, so a single fixed wait can see a
+    // connection reset; retry within a bounded budget instead.
     for task in &tricklers {
         task.abort();
     }
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let mut good = TcpStream::connect(addr).await.unwrap();
-    good.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), good.read_to_end(&mut response))
-        .await
-        .expect("no connection slot freed after trickling clients ended")
-        .unwrap();
+    let request = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    let mut served: Option<String> = None;
+    let retry = tokio::time::Instant::now();
+    while retry.elapsed() < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let Ok(mut good) = TcpStream::connect(addr).await else {
+            continue;
+        };
+        if good.write_all(request).await.is_err() {
+            continue;
+        }
+        let mut response = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(5), good.read_to_end(&mut response)).await {
+            // A reset mid-handshake is the drain race; retry.
+            Ok(Err(_)) | Err(_) => continue,
+            Ok(Ok(_)) => {}
+        }
+        if String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200") {
+            served = Some(String::from_utf8_lossy(&response).into_owned());
+            break;
+        }
+    }
+    let served = served.expect("no freed slot served a normal request within retry budget");
     assert!(
-        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"),
-        "freed slot must serve a normal request, got: {}",
-        String::from_utf8_lossy(&response)
+        served.starts_with("HTTP/1.1 200"),
+        "freed slot must serve a normal request, got: {served}"
     );
     server_task.abort();
 }
@@ -582,7 +601,8 @@ async fn deadline_driven_release_frees_gated_slot() {
 
 // ── Upstream 0.48.0 A1–A5: dashboard routes ───────────────────────────
 
-use dashboard::coordinator::SnapshotBuildFn;
+use crate::cli::serve::collection::SnapshotCollection;
+use dashboard::coordinator::{SnapshotArtifacts, SnapshotArtifactsBuildFn, SnapshotBuildFn};
 use dashboard::snapshot::{
     AccountFetchEnvelope, ClaudeAccountsInput, DashboardIdentity as DashboardIdMode,
     ProviderFetchEnvelope, SnapshotInput, build_snapshot,
@@ -606,32 +626,64 @@ fn stub_build(identity: DashboardIdMode, with_accounts: bool, delay: Duration) -
                 }]),
             });
             Ok(build_snapshot(&SnapshotInput {
-                providers: vec![ProviderFetchEnvelope {
-                    id: "claude".to_string(),
-                    display_name: "Claude".to_string(),
-                    session_label: "Session".to_string(),
-                    weekly_label: "Weekly".to_string(),
-                    fetch: Ok(crate::core::ProviderFetchResult::new(usage, "test")),
-                }],
-                costs: std::collections::HashMap::new(),
-                claude_accounts,
+                collection: SnapshotCollection {
+                    providers: vec![ProviderFetchEnvelope {
+                        id: "claude".to_string(),
+                        display_name: "Claude".to_string(),
+                        session_label: "Session".to_string(),
+                        weekly_label: "Weekly".to_string(),
+                        fetch: Ok(crate::core::ProviderFetchResult::new(usage, "test")),
+                    }],
+                    costs: std::collections::HashMap::new(),
+                    claude_accounts,
+                    generated_at: chrono::Utc::now(),
+                    refresh_seconds: 60,
+                    order: vec![],
+                    enabled: std::collections::BTreeSet::new(),
+                },
                 identity,
-                generated_at: chrono::Utc::now(),
-                refresh_seconds: 60,
                 version: Some("test".to_string()),
-                order: vec![],
-                enabled: std::collections::BTreeSet::new(),
+                usage_bars_show_used: None,
             }))
         })
     })
 }
 
 fn stub_state_ok() -> dashboard::DashboardState {
-    dashboard::DashboardState::stub(
-        stub_build(DashboardIdMode::Redacted, false, Duration::ZERO),
-        3600,
-        Some(DashboardIdMode::Redacted),
-    )
+    let build: SnapshotArtifactsBuildFn<metrics::MetricsSnapshot> =
+        std::sync::Arc::new(|| {
+            Box::pin(async move {
+                let mut usage = crate::core::UsageSnapshot::new(
+                    crate::core::RateWindow::with_details(11.0, Some(300), None, None),
+                );
+                usage.updated_at = chrono::Utc::now();
+                let input = SnapshotInput {
+                    collection: SnapshotCollection {
+                        providers: vec![ProviderFetchEnvelope {
+                            id: "codex".to_string(),
+                            display_name: "Codex".to_string(),
+                            session_label: "Session".to_string(),
+                            weekly_label: "Weekly".to_string(),
+                            fetch: Ok(crate::core::ProviderFetchResult::new(usage, "test")),
+                        }],
+                        costs: std::collections::HashMap::new(),
+                        claude_accounts: None,
+                        generated_at: chrono::Utc::now(),
+                        refresh_seconds: 60,
+                        order: vec!["codex".to_string()],
+                        enabled: ["codex".to_string()].into_iter().collect(),
+                    },
+                    identity: DashboardIdMode::Redacted,
+                    version: Some("test".to_string()),
+                    usage_bars_show_used: None,
+                };
+                Ok(SnapshotArtifacts {
+                    dashboard: build_snapshot(&input),
+                    sidecar: Some(metrics::MetricsSnapshot::from_collection(&input.collection)),
+                })
+            })
+        });
+    dashboard::DashboardState::stub_with_artifacts(build, 3600, Some(DashboardIdMode::Redacted))
 }
 
 fn dashboard_test_config(
@@ -668,6 +720,10 @@ fn resolve_route_maps_paths() {
         })
     );
     assert_eq!(
+        resolve_route(&req("/metrics", &[])),
+        Some(ServeRoute::Metrics)
+    );
+    assert_eq!(
         resolve_route(&req("/dashboard/v1/snapshot", &[])),
         Some(ServeRoute::DashboardSnapshot)
     );
@@ -681,6 +737,89 @@ fn resolve_route_maps_paths() {
     assert_eq!(resolve_route(&req("/icons/.svg", &[])), None);
     assert_eq!(resolve_route(&req("/dashboard/v1/other", &[])), None);
     assert_eq!(resolve_route(&req("/usage.json", &[])), None);
+}
+
+#[tokio::test]
+async fn metrics_route_is_not_found_until_enabled() {
+    let config = dashboard_test_config(Some("s3cret"), Some(stub_state_ok()));
+    let response = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\r\n",
+        config,
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 404"), "got: {response}");
+    assert!(response.contains(r#""error":"not found""#));
+}
+
+#[tokio::test]
+async fn metrics_route_uses_bearer_gate_and_prometheus_content_type() {
+    let mut missing_config = dashboard_test_config(Some("s3cret"), Some(stub_state_ok()));
+    missing_config.metrics_enabled = true;
+    let missing = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        missing_config,
+    )
+    .await;
+    assert!(missing.starts_with("HTTP/1.1 401"), "got: {missing}");
+    assert!(missing.contains("WWW-Authenticate: Bearer\r\n"));
+
+    let mut wrong_config = dashboard_test_config(Some("s3cret"), Some(stub_state_ok()));
+    wrong_config.metrics_enabled = true;
+    let wrong = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer nope\r\n\r\n",
+        wrong_config,
+    )
+    .await;
+    assert!(wrong.starts_with("HTTP/1.1 401"), "got: {wrong}");
+
+    let ready_state = stub_state_ok();
+    ready_state.coordinator.get().await.unwrap();
+    let mut ok_config = dashboard_test_config(Some("s3cret"), Some(ready_state));
+    ok_config.metrics_enabled = true;
+    let ok = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\r\n",
+        ok_config,
+    )
+    .await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "got: {ok}");
+    assert!(ok.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n"));
+    assert!(ok.contains("Cache-Control: no-store\r\n"));
+    assert!(
+        ok.contains("codexbar_snapshot_schema_version 1\n"),
+        "got: {ok}"
+    );
+    assert!(
+        ok.contains("codexbar_quota_session_used_ratio{provider=\"codex\"}"),
+        "got: {ok}"
+    );
+}
+
+#[tokio::test]
+async fn metrics_route_returns_500_when_exporter_state_is_missing() {
+    let mut config = dashboard_test_config(Some("s3cret"), None);
+    config.metrics_enabled = true;
+    let response = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\r\n",
+        config,
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 500"), "got: {response}");
+    assert!(response.contains(r#""error":"dashboard not configured""#));
+}
+
+#[tokio::test]
+async fn metrics_route_keeps_the_host_allowlist() {
+    let mut config = dashboard_test_config(Some("s3cret"), Some(stub_state_ok()));
+    config.metrics_enabled = true;
+    config.host = "192.0.2.10".to_string();
+    let forbidden = request_roundtrip_dashboard(
+        b"GET /metrics HTTP/1.1\r\nHost: 192.0.2.11:8080\r\nAuthorization: Bearer s3cret\r\n\r\n",
+        config,
+    )
+    .await;
+    assert!(forbidden.starts_with("HTTP/1.1 403"), "got: {forbidden}");
+    assert!(forbidden.contains(r#""error":"forbidden host""#));
 }
 
 #[tokio::test]
