@@ -23,6 +23,8 @@ use crate::settings::ApiKeys;
 const OLLAMA_SETTINGS_URL: &str = "https://ollama.com/settings";
 const OLLAMA_TAGS_URL: &str = "https://ollama.com/api/tags";
 const OLLAMA_VALIDATION_URL: &str = "https://ollama.com/api/web_search";
+const OLLAMA_MONTHLY_WINDOW_MINUTES: u32 = 30 * 24 * 60;
+const OLLAMA_MONTHLY_USAGE_LABEL: &str = "Monthly usage";
 
 /// Ollama provider
 pub struct OllamaProvider {
@@ -51,6 +53,7 @@ impl OllamaProvider {
                 is_primary: false,
                 dashboard_url: Some("https://ollama.com/settings"),
                 status_page_url: None,
+                tertiary_label_key: None,
             },
         }
     }
@@ -233,23 +236,34 @@ impl OllamaProvider {
         // Check if we're signed out
         if html.contains("Sign in")
             && !html.contains("Cloud Usage")
+            && !html.contains("Included usage")
+            && !html.contains(OLLAMA_MONTHLY_USAGE_LABEL)
             && !html.contains("Session usage")
         {
             return Err(ProviderError::AuthRequired);
         }
 
+        let monthly_block = self.parse_usage_block(
+            &[OLLAMA_MONTHLY_USAGE_LABEL],
+            html,
+            Some(OLLAMA_MONTHLY_WINDOW_MINUTES),
+        );
         let session_block =
             self.parse_usage_block(&["Session usage", "Hourly usage"], html, Some(5 * 60));
         let weekly_block = self.parse_usage_block(&["Weekly usage"], html, Some(7 * 24 * 60));
 
-        if session_block.is_none() && weekly_block.is_none() {
+        if monthly_block.is_none() && session_block.is_none() && weekly_block.is_none() {
             return Err(ProviderError::Parse(
                 "Could not find usage data on Ollama settings page".to_string(),
             ));
         }
 
-        let primary = rate_window_from_usage_block(session_block.as_ref());
+        let primary =
+            rate_window_from_usage_block(monthly_block.as_ref().or(session_block.as_ref()));
         let mut usage = UsageSnapshot::new(primary);
+        if monthly_block.is_some() {
+            usage = usage.with_primary_label("Monthly");
+        }
 
         // Parse plan name
         if let Some(plan) = self.parse_plan_name(html) {
@@ -294,6 +308,15 @@ impl OllamaProvider {
                     });
                 }
 
+                if let Some(val) = parse_dollar_used_percent(window) {
+                    return Some(UsageBlock {
+                        used_percent: val,
+                        window_minutes,
+                        resets_at: parse_first_datetime(window),
+                        reset_description: parse_reset_description(window),
+                    });
+                }
+
                 // Try "width: XX%" pattern (progress bar CSS)
                 let width_re = Regex::new(r"width:\s*(\d+(?:\.\d+)?)%").ok()?;
                 if let Some(caps) = width_re.captures(window)
@@ -311,12 +334,23 @@ impl OllamaProvider {
         None
     }
 
-    /// Parse plan name from "Cloud Usage" section
+    /// Parse plan name from the current "Included usage" or legacy "Cloud Usage" section.
     fn parse_plan_name(&self, html: &str) -> Option<String> {
-        let re = Regex::new(r#"Cloud Usage\s*</span>\s*<span[^>]*>([^<]+)</span>"#).ok()?;
-        re.captures(html)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().trim().to_string())
+        for pattern in [
+            r#"Included usage\s*</span\s*>\s*<span[^>]*>([^<]+)</span"#,
+            r#"Cloud Usage\s*</span>\s*<span[^>]*>([^<]+)</span>"#,
+        ] {
+            let re = Regex::new(pattern).ok()?;
+            if let Some(plan) = re
+                .captures(html)
+                .and_then(|caps| caps.get(1))
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                return Some(plan);
+            }
+        }
+        None
     }
 
     /// Parse account email from the page
@@ -347,10 +381,12 @@ impl Provider for OllamaProvider {
 
         match ctx.source_mode {
             SourceMode::Auto => {
-                if Self::has_api_key(ctx)
-                    && let Ok(usage) = self.fetch_usage_api(ctx).await
-                {
-                    return Ok(ProviderFetchResult::new(usage, "api"));
+                if Self::has_api_key(ctx) {
+                    match self.fetch_usage_api(ctx).await {
+                        Ok(usage) => return Ok(ProviderFetchResult::new(usage, "api")),
+                        Err(error) if error.is_transport_failure() => return Err(error),
+                        Err(_) => {}
+                    }
                 }
                 let usage = self.fetch_usage_web(ctx).await?;
                 Ok(ProviderFetchResult::new(usage, "web"))
@@ -376,6 +412,10 @@ impl Provider for OllamaProvider {
     fn supports_cli(&self) -> bool {
         false
     }
+
+    fn retains_last_good_on_transport_failure(&self) -> bool {
+        true
+    }
 }
 
 fn clean_secret(raw: Option<&str>) -> Option<String> {
@@ -392,13 +432,33 @@ fn clean_secret(raw: Option<&str>) -> Option<String> {
 }
 
 fn usage_block_end(tail: &str, current_label: &str) -> Option<usize> {
-    ["Session usage", "Hourly usage", "Weekly usage"]
-        .iter()
-        .filter(|label| **label != current_label)
-        .filter_map(|label| tail.get(current_label.len()..)?.find(label))
-        .map(|idx| idx + current_label.len())
-        .min()
-        .map(|idx| idx.min(4000))
+    [
+        OLLAMA_MONTHLY_USAGE_LABEL,
+        "Session usage",
+        "Hourly usage",
+        "Weekly usage",
+    ]
+    .iter()
+    .filter(|label| **label != current_label)
+    .filter_map(|label| tail.get(current_label.len()..)?.find(label))
+    .map(|idx| idx + current_label.len())
+    .min()
+    .map(|idx| idx.min(4000))
+}
+
+/// Convert included dollar credits to quota utilization, not a spend estimate.
+fn parse_dollar_used_percent(text: &str) -> Option<f64> {
+    let amount = r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)";
+    let pattern = format!(r"(?i)\$\s*{amount}\s+of\s+\$\s*{amount}\s+used");
+    let re = Regex::new(&pattern).ok()?;
+    let caps = re.captures(text)?;
+    let used = caps.get(1)?.as_str().replace(',', "").parse::<f64>().ok()?;
+    let limit = caps.get(2)?.as_str().replace(',', "").parse::<f64>().ok()?;
+    if !used.is_finite() || !limit.is_finite() || limit <= 0.0 {
+        return None;
+    }
+    let percent = used / limit * 100.0;
+    percent.is_finite().then_some(percent)
 }
 
 fn rate_window_from_usage_block(block: Option<&UsageBlock>) -> RateWindow {
@@ -511,6 +571,7 @@ fn ollama_api_key_error() -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::LastGoodFailurePolicy;
 
     #[tokio::test]
     async fn settings_fetch_follows_same_origin_redirects() {
@@ -704,6 +765,50 @@ mod tests {
     }
 
     #[test]
+    fn preserves_legacy_ollama_session_and_weekly_payloads() {
+        let provider = OllamaProvider::new();
+        let snapshot = provider
+            .parse_usage_html(
+                r#"
+                    <span>Cloud Usage</span><span>Free</span>
+                    <section>Session usage <span>42% used</span></section>
+                    <section>Weekly usage <span>84% used</span></section>
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.primary.used_percent, 42.0);
+        assert_eq!(snapshot.primary.window_minutes, Some(5 * 60));
+        assert_eq!(snapshot.primary_label, None);
+        assert_eq!(snapshot.secondary.unwrap().used_percent, 84.0);
+        assert_eq!(snapshot.login_method.as_deref(), Some("Free"));
+    }
+
+    #[test]
+    fn parses_monthly_included_credits_and_keeps_weekly_window() {
+        let provider = OllamaProvider::new();
+        let snapshot = provider
+            .parse_usage_html(
+                r#"
+                    <span>Included usage</span><span>Pro</span>
+                    <section>Monthly usage <span>$7.50 of $60 used</span>
+                        <time>2026-09-30T00:00:00Z</time></section>
+                    <section>Weekly usage <span>25% used</span></section>
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.primary.used_percent, 12.5);
+        assert_eq!(
+            snapshot.primary.window_minutes,
+            Some(OLLAMA_MONTHLY_WINDOW_MINUTES)
+        );
+        assert_eq!(snapshot.primary_label.as_deref(), Some("Monthly"));
+        assert_eq!(snapshot.secondary.unwrap().used_percent, 25.0);
+        assert_eq!(snapshot.login_method.as_deref(), Some("Pro"));
+    }
+
+    #[test]
     fn parses_ollama_usage_blocks_with_window_bounds() {
         let provider = OllamaProvider::new();
         let html = r#"
@@ -740,6 +845,21 @@ mod tests {
         assert_eq!(
             ollama_session_action(true, false, true),
             OllamaSessionAction::ReimportBrowser
+        );
+    }
+
+    #[test]
+    fn transport_policy_replaces_free_form_wrappers() {
+        let provider = OllamaProvider::new();
+        assert_eq!(
+            provider.last_good_failure_policy_for_error(&ProviderError::Timeout),
+            LastGoodFailurePolicy::Preserve
+        );
+        assert_eq!(
+            provider.last_good_failure_policy_for_error(&ProviderError::Other(
+                "Network error: arbitrary wrapper".to_string(),
+            )),
+            LastGoodFailurePolicy::Replace
         );
     }
 }

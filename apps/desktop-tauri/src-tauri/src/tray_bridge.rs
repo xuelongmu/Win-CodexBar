@@ -16,13 +16,9 @@ use codexbar::tray::{render_bar_icon_rgba, render_percent_icon_rgba};
 
 use crate::shell;
 use crate::state::{AppState, TrayAnchor};
-use crate::surface::SurfaceMode;
-use crate::surface_target::SurfaceTarget;
 #[cfg(test)]
 use crate::tray_menu::build_tray_menu;
-use crate::tray_menu::{
-    TrayMenuEntry, build_tray_menu_with, claude_accounts_menu, codex_accounts_menu,
-};
+use crate::tray_menu::{TrayMenuEntry, build_tray_menu_with};
 
 #[derive(Debug, Clone, Copy)]
 struct MonitorScaleInfo {
@@ -139,27 +135,7 @@ fn build_native_tray_menu(
         settings.float_bar_enabled,
         settings.ui_language,
     );
-    let accounts = crate::commands::load_codex_accounts().unwrap_or_default();
-    let active =
-        codexbar::codex_accounts::CodexAccountManager::new().discover_ambient_account(&accounts);
-    spec.insert(
-        0,
-        codex_accounts_menu(
-            &accounts,
-            active.as_ref(),
-            settings.ui_language,
-            settings.hide_personal_info,
-        ),
-    );
-    let claude_accounts = crate::commands::claude_accounts_list().unwrap_or_default();
-    spec.insert(
-        1,
-        claude_accounts_menu(
-            &claude_accounts,
-            settings.ui_language,
-            settings.hide_personal_info,
-        ),
-    );
+    crate::tray_accounts::prepend_account_menus(&mut spec, &settings);
     let entries = spec
         .iter()
         .map(|entry| build_native_menu_entry(app, entry))
@@ -172,31 +148,7 @@ fn build_native_tray_menu(
     Menu::with_items(app, &item_refs)
 }
 
-fn resolve_menu_target(id: &str) -> Option<shell::ShellTransitionRequest> {
-    match id {
-        // "Show Window" — the full draggable window (PopOut mode), unchanged.
-        "show_panel" => Some(shell::ShellTransitionRequest {
-            mode: SurfaceMode::PopOut,
-            target: SurfaceTarget::Dashboard,
-            position: None,
-        }),
-        // NOTE: "pop_out" ("Pop Out Dashboard") is NOT handled here — it opens
-        // the dedicated flyout window (MenuAction::OpenFlyout in
-        // resolve_menu_action below), not a `shell::ShellTransitionRequest`
-        // against the `main`-window surface-mode machine. `SurfaceMode::TrayPanel`
-        // remains as a data key (geometry-key / window_properties source /
-        // panel-size reference) but `main` no longer transitions into it.
-        _ if id.starts_with("provider:") => Some(shell::ShellTransitionRequest {
-            mode: SurfaceMode::PopOut,
-            target: SurfaceTarget::parse(id)?,
-            position: None,
-        }),
-        _ => None,
-    }
-}
-
 enum MenuAction {
-    Transition(shell::ShellTransitionRequest),
     /// Open Settings/About in a detached window.
     OpenSettings(String),
     /// Open (or focus) the dedicated flyout ("Pop Out Dashboard") window.
@@ -207,21 +159,14 @@ enum MenuAction {
     ToggleProvider(String),
     /// Toggle the floating bar window on/off.
     ToggleFloatBar,
-    AddCodexAccount,
-    AddClaudeAccount,
-    SaveClaudeAccount,
-    CancelClaudeLogin,
-    SwitchClaudeAccount(String),
-    SwitchCodexAccount(String),
+    Account(crate::tray_accounts::AccountMenuAction),
     Quit,
 }
 
-enum MenuTransitionDispatch {
-    Transition(shell::ShellTransitionRequest),
-    Reopen(shell::ShellTransitionRequest),
-}
-
 fn resolve_menu_action(id: &str) -> Option<MenuAction> {
+    if let Some(action) = crate::tray_accounts::resolve_action(id) {
+        return Some(MenuAction::Account(action));
+    }
     match id {
         "refresh" => Some(MenuAction::Refresh),
         "check_for_updates" => Some(MenuAction::CheckForUpdates),
@@ -230,39 +175,11 @@ fn resolve_menu_action(id: &str) -> Option<MenuAction> {
         "about" => Some(MenuAction::OpenSettings("about".into())),
         "toggle_float_bar" => Some(MenuAction::ToggleFloatBar),
         "pop_out" => Some(MenuAction::OpenFlyout),
-        "add_codex_account" => Some(MenuAction::AddCodexAccount),
-        "add_claude_account" => Some(MenuAction::AddClaudeAccount),
-        "save_claude_account" => Some(MenuAction::SaveClaudeAccount),
-        "cancel_claude_login" => Some(MenuAction::CancelClaudeLogin),
-        _ if id.starts_with("switch_claude_account:") => {
-            let id = id.strip_prefix("switch_claude_account:")?;
-            (!id.is_empty()).then(|| MenuAction::SwitchClaudeAccount(id.to_string()))
-        }
-        _ if id.starts_with("switch_codex_account:") => {
-            let id = id.strip_prefix("switch_codex_account:")?;
-            uuid::Uuid::parse_str(id).ok()?;
-            Some(MenuAction::SwitchCodexAccount(id.to_string()))
-        }
         _ if id.starts_with("toggle_provider:") => {
             let provider_id = id["toggle_provider:".len()..].to_string();
             Some(MenuAction::ToggleProvider(provider_id))
         }
-        _ => resolve_menu_target(id).map(MenuAction::Transition),
-    }
-}
-
-fn resolve_menu_transition_dispatch(
-    id: &str,
-    request: shell::ShellTransitionRequest,
-) -> MenuTransitionDispatch {
-    if id == "show_panel" {
-        MenuTransitionDispatch::Reopen(shell::ShellTransitionRequest {
-            mode: request.mode,
-            target: request.target,
-            position: None,
-        })
-    } else {
-        MenuTransitionDispatch::Transition(request)
+        _ => None,
     }
 }
 
@@ -314,13 +231,11 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let app = tray.app_handle();
                 if button == MouseButton::Left && button_state == MouseButtonState::Up {
                     store_anchor(app, &rect, position);
-                    // Left-click toggles the dedicated flyout window (Pop Out
+                    // Left-click toggles the tray-panel flyout window (Pop Out
                     // Dashboard): open it, or cleanly close it when this same
                     // click already blur-dismissed it (no open→close flicker).
-                    // The full window stays available via "Show Window"
-                    // (SurfaceMode::PopOut on `main`) — the two now coexist as
-                    // separate OS windows instead of mutually-exclusive states
-                    // of one window. Called directly (not spawned): native
+                    // The flyout is the only dashboard layout; the legacy
+                    // PopOut layout on `main` is retired. Called directly (not spawned): native
                     // tray-icon event callbacks run on the same main-thread
                     // event-loop context as `on_menu_event` below, where
                     // `settings_window::open_or_focus` is also called
@@ -370,102 +285,7 @@ fn schedule_tray_promotion_retries(app_handle: AppHandle) {
 /// Route a native menu-item click to the corresponding shell action.
 fn handle_menu_event(app: &AppHandle, id: &str) {
     match resolve_menu_action(id) {
-        Some(MenuAction::AddCodexAccount) => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                match crate::commands::codex_account_add(handle.clone()).await {
-                    Ok(_) => show_account_message(&handle, "Codex account added."),
-                    Err(error) => show_account_message(&handle, &error),
-                }
-            });
-        }
-        Some(MenuAction::SwitchCodexAccount(id)) => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                match crate::commands::codex_account_switch(handle.clone(), id).await {
-                    Ok(result) => {
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                        if result.desktop_session_restore_path.is_some() {
-                            let dialog_handle = handle.clone();
-                            let restart = tauri::async_runtime::spawn_blocking(move || {
-                                dialog_handle.dialog()
-                                    .message("Account switched. Restart Codex Desktop to use it? This stops running desktop tasks.")
-                                    .title("Codex Accounts")
-                                    .buttons(MessageDialogButtons::OkCancelCustom("Restart".into(), "Later".into()))
-                                    .blocking_show()
-                            }).await.unwrap_or(false);
-                            if restart {
-                                let result = crate::commands::codex_account_restart_desktop(
-                                    handle.clone(),
-                                    result.switch_id.to_string(),
-                                )
-                                .await;
-                                if let Err(error) = result {
-                                    show_account_message(&handle, &error);
-                                }
-                            }
-                        } else {
-                            show_account_message(&handle, "Codex account switched.");
-                        }
-                    }
-                    Err(error) => show_account_message(&handle, &error),
-                }
-            });
-        }
-        Some(MenuAction::CancelClaudeLogin) => crate::commands::claude_account_cancel_login(),
-        Some(
-            action @ (MenuAction::AddClaudeAccount
-            | MenuAction::SaveClaudeAccount
-            | MenuAction::SwitchClaudeAccount(_)),
-        ) => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_dialog::DialogExt;
-                let (result, message) = match action {
-                    MenuAction::AddClaudeAccount => (
-                        crate::commands::claude_account_add(handle.clone()).await,
-                        "Claude Code account added. Select it to switch.",
-                    ),
-                    MenuAction::SaveClaudeAccount => (
-                        crate::commands::claude_account_save_current(handle.clone()).await,
-                        "Current Claude Code account saved.",
-                    ),
-                    MenuAction::SwitchClaudeAccount(id) => (
-                        crate::commands::claude_account_switch(handle.clone(), id).await,
-                        "Claude Code account switched. Reopen the Claude Code CLI to use it.",
-                    ),
-                    _ => unreachable!(),
-                };
-                handle
-                    .dialog()
-                    .message(result.err().unwrap_or_else(|| message.to_string()))
-                    .title("Claude Code accounts")
-                    .show(|_| {});
-            });
-        }
-        Some(MenuAction::Transition(request)) => {
-            crate::auto_refresh::note_menu_open();
-            match resolve_menu_transition_dispatch(id, request) {
-                // Pass None so default_surface_position can use remembered PopOut
-                // geometry first, then fall back to tray/current-monitor placement.
-                MenuTransitionDispatch::Reopen(request) => {
-                    let _ = shell::reopen_to_target(
-                        app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
-                }
-                MenuTransitionDispatch::Transition(request) => {
-                    let _ = shell::transition_to_target(
-                        app,
-                        request.mode,
-                        request.target,
-                        request.position,
-                    );
-                }
-            }
-        }
+        Some(MenuAction::Account(action)) => crate::tray_accounts::handle_action(app, action),
         Some(MenuAction::OpenSettings(tab)) => {
             let _ = shell::settings_window::open_or_focus(app, &tab);
         }
@@ -511,23 +331,13 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-fn show_account_message(app: &AppHandle, message: &str) {
-    use tauri_plugin_dialog::DialogExt;
-    app.dialog()
-        .message(message)
-        .title("Codex Accounts")
-        .show(|_| {});
-}
-
 /// Rebuild the native tray menu from current provider + settings state.
 pub(crate) fn rebuild_tray_menu(app: &AppHandle) {
     let catalog = crate::commands::get_provider_catalog();
     let settings = Settings::load();
     let status_labels = if let Some(st) = app.try_state::<Mutex<AppState>>() {
         let guard = st.lock().unwrap();
-        let snapshots =
-            presentation_snapshots(&guard.provider_cache, settings.codex_spark_usage_visible());
-        status_labels_for_settings(&settings, &snapshots, settings.ui_language)
+        status_labels_for_settings(&settings, &guard.provider_cache, settings.ui_language)
     } else {
         vec![]
     };
@@ -545,8 +355,7 @@ pub fn update_tray_status_items(
 ) {
     let catalog = crate::commands::get_provider_catalog();
     let settings = Settings::load();
-    let snapshots = presentation_snapshots(snapshots, settings.codex_spark_usage_visible());
-    let status_labels = status_labels_for_settings(&settings, &snapshots, settings.ui_language);
+    let status_labels = status_labels_for_settings(&settings, snapshots, settings.ui_language);
 
     if let Ok(menu) = build_native_tray_menu(app, &catalog, &status_labels)
         && let Some(tray) = app.tray_by_id("codexbar-main")
@@ -563,17 +372,6 @@ pub(crate) fn refresh_tray_presentation(app: &AppHandle) {
         .unwrap_or_default();
     update_tray_status_items(app, &snapshots);
     update_tray_icon_and_tooltip(app, &snapshots);
-}
-
-fn presentation_snapshots(
-    snapshots: &[crate::commands::ProviderUsageSnapshot],
-    spark_usage_visible: bool,
-) -> Vec<crate::commands::ProviderUsageSnapshot> {
-    let mut snapshots = snapshots.to_vec();
-    for snapshot in &mut snapshots {
-        crate::commands::filter_hidden_codex_spark_rows(snapshot, spark_usage_visible);
-    }
-    snapshots
 }
 
 /// Update the tray icon pixels and tooltip text to reflect current provider usage.
@@ -597,7 +395,7 @@ pub fn update_tray_icon_and_tooltip(
 
     // ── Icon ─────────────────────────────────────────────────────────────
     let settings = Settings::load();
-    let snapshots = presentation_snapshots(snapshots, settings.codex_spark_usage_visible());
+    let snapshots = snapshots.to_vec();
     let ordered_snapshots = ordered_snapshot_refs(&settings, &snapshots);
     let ok_snapshots: Vec<_> = ordered_snapshots
         .iter()
@@ -797,14 +595,22 @@ fn selected_tray_percents(
     let (selected, companion) =
         crate::usage_metric::selected_usage_icon_windows(snapshot, settings);
     (
-        display_metric_percent(selected.used_percent, settings.show_as_used),
+        display_metric_percent(&selected, settings.show_as_used),
         companion
             .as_ref()
-            .map(|window| display_metric_percent(window.used_percent, settings.show_as_used)),
+            .map(|window| display_metric_percent(window, settings.show_as_used)),
     )
 }
 
-fn display_metric_percent(used_percent: f64, show_as_used: bool) -> f64 {
+fn display_metric_percent(window: &crate::commands::RateWindowSnapshot, show_as_used: bool) -> f64 {
+    if window.is_informational {
+        return 0.0;
+    }
+    if window.is_exhausted || window.used_percent >= 100.0 {
+        return if show_as_used { 100.0 } else { 0.0 };
+    }
+
+    let used_percent = window.used_percent;
     let used = used_percent.clamp(0.0, 100.0);
     if show_as_used { used } else { 100.0 - used }
 }
@@ -926,6 +732,7 @@ fn build_native_menu_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::surface::SurfaceMode;
 
     fn sample_provider_catalog() -> Vec<ProviderCatalogEntry> {
         vec![
@@ -957,26 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_account_actions_are_distinct_from_codex_and_reject_empty_ids() {
-        assert!(matches!(
-            resolve_menu_action("add_claude_account"),
-            Some(MenuAction::AddClaudeAccount)
-        ));
-        assert!(matches!(
-            resolve_menu_action("save_claude_account"),
-            Some(MenuAction::SaveClaudeAccount)
-        ));
-        assert!(matches!(
-            resolve_menu_action("cancel_claude_login"),
-            Some(MenuAction::CancelClaudeLogin)
-        ));
-        assert!(
-            matches!(resolve_menu_action("switch_claude_account:a:org"), Some(MenuAction::SwitchClaudeAccount(id)) if id == "a:org")
-        );
-        assert!(resolve_menu_action("switch_claude_account:").is_none());
-    }
-
-    #[test]
     fn toggle_float_bar_routes_to_toggle_action() {
         let action = resolve_menu_action("toggle_float_bar").expect("float bar action");
         assert!(matches!(action, MenuAction::ToggleFloatBar));
@@ -998,33 +785,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_menu_routes_to_provider_popout_target() {
-        let action = resolve_menu_target("provider:codex").expect("provider target");
-        assert_eq!(action.mode, SurfaceMode::PopOut);
-        assert_eq!(
-            action.target,
-            SurfaceTarget::Provider {
-                provider_id: "codex".into()
-            }
-        );
-    }
-
-    #[test]
     fn pop_out_menu_routes_to_open_flyout_action() {
-        // "Pop Out Dashboard" opens the dedicated flyout window — not a
-        // `shell::ShellTransitionRequest` against the `main`-window surface
-        // machine — which is what lets it coexist with "Show Window"
-        // (SurfaceMode::PopOut, which stays on `main`) instead of the two
-        // being mutually-exclusive states of one window.
+        // "Pop Out Dashboard" opens the tray-panel flyout window, the only
+        // dashboard layout.
         let action = resolve_menu_action("pop_out").expect("pop_out action");
         assert!(matches!(action, MenuAction::OpenFlyout));
-
-        // resolve_menu_target no longer resolves "pop_out" at all — it is
-        // intercepted earlier in resolve_menu_action.
-        assert!(resolve_menu_target("pop_out").is_none());
-
-        let show_window = resolve_menu_target("show_panel").expect("show_panel target");
-        assert_eq!(show_window.mode, SurfaceMode::PopOut);
 
         // SurfaceMode::TrayPanel is retained purely as a data key (geometry
         // key / window_properties source / panel-size reference) for the
@@ -1034,65 +799,11 @@ mod tests {
     }
 
     #[test]
-    fn show_panel_menu_reopens_popout_dashboard_with_default_position_chain() {
-        let request = resolve_menu_target("show_panel").expect("show_panel target");
-        assert_eq!(request.mode, SurfaceMode::PopOut);
-        assert_eq!(request.target, SurfaceTarget::Dashboard);
-
-        let dispatch = resolve_menu_transition_dispatch(
-            "show_panel",
-            shell::ShellTransitionRequest {
-                mode: SurfaceMode::PopOut,
-                target: SurfaceTarget::Dashboard,
-                position: Some((320, 240)),
-            },
-        );
-
-        match dispatch {
-            MenuTransitionDispatch::Reopen(request) => {
-                assert_eq!(request.mode, SurfaceMode::PopOut);
-                assert_eq!(request.target, SurfaceTarget::Dashboard);
-                assert_eq!(request.position, None);
-            }
-            MenuTransitionDispatch::Transition(_) => {
-                panic!("show_panel should reopen via default PopOut positioning")
-            }
-        }
-    }
-
-    #[test]
-    fn non_show_panel_menu_keeps_explicit_position() {
-        // "pop_out" no longer reaches resolve_menu_transition_dispatch at all
-        // (it's intercepted as MenuAction::OpenFlyout in resolve_menu_action
-        // before falling through to resolve_menu_target); a provider deep
-        // link is the realistic surviving non-"show_panel" caller of this
-        // dispatch function today.
-        let dispatch = resolve_menu_transition_dispatch(
-            "provider:codex",
-            shell::ShellTransitionRequest {
-                mode: SurfaceMode::PopOut,
-                target: SurfaceTarget::Provider {
-                    provider_id: "codex".into(),
-                },
-                position: Some((320, 240)),
-            },
-        );
-
-        match dispatch {
-            MenuTransitionDispatch::Transition(request) => {
-                assert_eq!(request.mode, SurfaceMode::PopOut);
-                assert_eq!(
-                    request.target,
-                    SurfaceTarget::Provider {
-                        provider_id: "codex".into()
-                    }
-                );
-                assert_eq!(request.position, Some((320, 240)));
-            }
-            MenuTransitionDispatch::Reopen(_) => {
-                panic!("non-show-panel actions should use direct transitions")
-            }
-        }
+    fn legacy_popout_menu_ids_no_longer_route_anywhere() {
+        // "show_panel" ("Show Window") and "provider:<id>" used to open the
+        // retired PopOut layout on `main`.
+        assert!(resolve_menu_action("show_panel").is_none());
+        assert!(resolve_menu_action("provider:codex").is_none());
     }
 
     #[test]
@@ -1209,6 +920,8 @@ mod tests {
             }),
             tertiary_label: None,
             extra_rate_windows: Vec::new(),
+            inventory: Vec::new(),
+            display_details: Vec::new(),
             cost: cost.map(|(used, limit)| crate::commands::CostSnapshotBridge {
                 used,
                 limit: Some(limit),
@@ -1221,11 +934,16 @@ mod tests {
                 formatted_limit: Some(format!("${limit:.2}")),
                 balance: None,
                 formatted_balance: None,
+                balance_updated_at: None,
+                account_id: None,
                 daily: Vec::new(),
+                always_visible: false,
             }),
             plan_name: None,
             account_email: None,
+            subscription: None,
             source_label: String::new(),
+            has_successful_claude_cli_quota: false,
             updated_at: "2025-01-01T00:00:00Z".into(),
             error: None,
             error_state: codexbar::core::ProviderStateKind::Ready,
@@ -1250,6 +968,7 @@ mod tests {
         crate::commands::NamedRateWindowSnapshot {
             id: "additional_budget".to_string(),
             title: "Additional Budget".to_string(),
+            fallback_lane: false,
             window: crate::commands::RateWindowSnapshot {
                 used_percent: percent,
                 remaining_percent: 100.0 - percent,
@@ -1517,6 +1236,76 @@ mod tests {
 
         assert_eq!(primary, 85.0);
         assert_eq!(secondary, Some(80.0));
+    }
+
+    #[test]
+    fn exhausted_automatic_window_never_renders_as_remaining_progress() {
+        let mut settings = Settings {
+            show_as_used: false,
+            ..Settings::default()
+        };
+        let mut snapshot = fake_snapshot_with(
+            "opencodego",
+            "OpenCode Go",
+            20.0,
+            Some(60.0),
+            Some(40.0),
+            None,
+        );
+        snapshot
+            .tertiary
+            .as_mut()
+            .expect("monthly quota")
+            .is_exhausted = true;
+
+        let (remaining, _) = selected_tray_percents(&snapshot, &settings);
+        assert_eq!(remaining, 0.0);
+
+        settings.show_as_used = true;
+        let (used, _) = selected_tray_percents(&snapshot, &settings);
+        assert_eq!(used, 100.0);
+    }
+
+    #[test]
+    fn full_automatic_window_without_exhausted_flag_has_zero_remaining_progress() {
+        let mut settings = Settings {
+            show_as_used: false,
+            ..Settings::default()
+        };
+        let mut snapshot = fake_snapshot_with(
+            "opencodego",
+            "OpenCode Go",
+            20.0,
+            Some(60.0),
+            Some(100.0),
+            None,
+        );
+        snapshot
+            .tertiary
+            .as_mut()
+            .expect("monthly quota")
+            .is_exhausted = false;
+
+        let (remaining, _) = selected_tray_percents(&snapshot, &settings);
+        assert_eq!(remaining, 0.0);
+
+        settings.show_as_used = true;
+        let (used, _) = selected_tray_percents(&snapshot, &settings);
+        assert_eq!(used, 100.0);
+    }
+
+    #[test]
+    fn missing_automatic_window_does_not_look_like_available_remaining_progress() {
+        let settings = Settings {
+            show_as_used: false,
+            ..Settings::default()
+        };
+        let mut snapshot = fake_snapshot_with("opencodego", "OpenCode Go", 0.0, None, None, None);
+        snapshot.primary.is_informational = true;
+
+        let (remaining, _) = selected_tray_percents(&snapshot, &settings);
+
+        assert_eq!(remaining, 0.0);
     }
 
     #[test]

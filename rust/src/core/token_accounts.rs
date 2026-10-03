@@ -213,6 +213,14 @@ impl TokenAccountSupport {
                 requires_manual_cookie_source: true,
                 cookie_name: Some("token_v2"),
             }),
+            ProviderId::Replicate => Some(TokenAccountSupport {
+                title: "Session tokens",
+                subtitle: "Store multiple Replicate Cookie headers from the billing page.",
+                placeholder: "Cookie: sessionid=...; ...",
+                injection: TokenInjection::CookieHeader,
+                requires_manual_cookie_source: true,
+                cookie_name: Some("sessionid"),
+            }),
             ProviderId::Sub2Api => Some(TokenAccountSupport {
                 title: "Group API keys",
                 subtitle: "Store multiple sub2api group API keys with labels such as Claude, Codex, or Gemini.",
@@ -229,6 +237,16 @@ impl TokenAccountSupport {
                 placeholder: "API key from deepinfra.com/dash",
                 injection: TokenInjection::Environment {
                     key: "DEEPINFRA_API_KEY".to_string(),
+                },
+                requires_manual_cookie_source: false,
+                cookie_name: None,
+            }),
+            ProviderId::HuggingFace => Some(TokenAccountSupport {
+                title: "API tokens",
+                subtitle: "Store multiple Hugging Face access tokens.",
+                placeholder: "Paste a Hugging Face access token",
+                injection: TokenInjection::Environment {
+                    key: "CODEXBAR_HUGGINGFACE_API_KEY".to_string(),
                 },
                 requires_manual_cookie_source: false,
                 cookie_name: None,
@@ -314,6 +332,7 @@ impl TokenAccountSupport {
             }),
             // These providers don't support token accounts
             ProviderId::Codex
+            | ProviderId::Pi
             | ProviderId::Gemini
             | ProviderId::Antigravity
             | ProviderId::Kiro
@@ -331,6 +350,7 @@ impl TokenAccountSupport {
             | ProviderId::Kilo
             | ProviderId::Bedrock
             | ProviderId::Codebuff
+            | ProviderId::CodeRabbit
             | ProviderId::DeepSeek
             | ProviderId::Windsurf
             | ProviderId::Doubao
@@ -341,6 +361,9 @@ impl TokenAccountSupport {
             | ProviderId::ElevenLabs
             | ProviderId::Deepgram
             | ProviderId::Groq
+            | ProviderId::Helmcode
+            | ProviderId::V0
+            | ProviderId::TypeSafe
             | ProviderId::LLMProxy
             | ProviderId::Chutes
             | ProviderId::LiteLLM
@@ -351,7 +374,10 @@ impl TokenAccountSupport {
             | ProviderId::LongCat
             | ProviderId::Wayfinder
             | ProviderId::QwenCloud
-            | ProviderId::Fireworks => None,
+            | ProviderId::Fireworks
+            | ProviderId::Meta
+            | ProviderId::Nous
+            | ProviderId::Muse => None,
         }
     }
 
@@ -461,6 +487,9 @@ pub struct TokenAccount {
     pub label: String,
     /// The token/cookie value
     pub token: String,
+    /// Stable external identity supplied by the provider, when available
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_identifier: Option<String>,
     /// When this account was added (Unix timestamp in seconds)
     pub added_at: i64,
     /// When this account was last used (Unix timestamp in seconds)
@@ -475,6 +504,7 @@ impl TokenAccount {
             id: Uuid::new_v4(),
             label: label.into(),
             token: token.into(),
+            external_identifier: None,
             added_at: Utc::now().timestamp(),
             last_used: None,
         }

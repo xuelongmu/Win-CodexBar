@@ -12,9 +12,11 @@ import { providerSupportsChartData } from "../lib/providerCharts";
 import MenuCardDetails, { describeCard, type MetricEntry } from "./MenuCardDetails";
 import CodexAccountsMenu from "./CodexAccountsMenu";
 import ClaudeAccountsMenu from "./ClaudeAccountsMenu";
+import GrokAccountsMenu from "./GrokAccountsMenu";
 import { DEEPSEEK_PRICING_EVENT } from "../hooks/useDeepSeekPricingStatus";
 import { getDeepSeekPricingStatus } from "../lib/tauri";
 import type { DeepSeekPricingStatus } from "../types/bridge";
+import { isUsageItemVisible } from "../lib/usageItemVisibility";
 
 /** Small copy-to-clipboard button matching macOS CopyIconButton (doc.on.doc → checkmark). */
 function CopyIconButton({ text }: { text: string }) {
@@ -49,7 +51,11 @@ export interface MenuCardDisplayOptions {
   showResetWhenExhausted?: boolean;
   showPace?: boolean;
   showAsUsed?: boolean;
-  compactMetrics?: boolean;
+  /**
+   * Compact Overview layout: slice to the first two quota rows and omit
+   * supplemental content (wayfinder, cost, charts, extra texts).
+   */
+  compactOverview?: boolean;
   costSummaryDisplayStyle?: CostSummaryDisplayStyle;
 }
 
@@ -75,8 +81,14 @@ function localizeWindowLabel(
   t: (key: LocaleKey) => string,
   language?: string,
   windowMinutes?: number | null,
+  windowId?: string,
 ): string {
   const normalized = raw?.trim().toLowerCase();
+  if (windowId?.startsWith("claude-weekly-scoped-")) {
+    const modelName = raw?.trim().replace(/\s+only\s*$/i, "").trim();
+    const template = t("ClaudeScopedWeeklyLabel");
+    return modelName ? template.replace("{}", modelName) : template.replace("{}", "");
+  }
   // Upstream 0.55.0 #3070: quota windows in Simplified Chinese use their
   // actual duration instead of the conversational Session wording.
   if (language === "chinese" && normalized === "session" && windowMinutes != null) {
@@ -135,7 +147,7 @@ export default function MenuCard({
     showResetWhenExhausted = false,
     showPace = true,
     showAsUsed = false,
-    compactMetrics = false,
+    compactOverview = false,
     costSummaryDisplayStyle,
   } = display;
   const { t, language } = useLocale();
@@ -219,12 +231,16 @@ export default function MenuCard({
   for (const extra of provider.extraRateWindows ?? []) {
     metrics.push({
       id: `extra-${extra.id}`,
-      label: extra.title,
+      label:
+        localizeWindowLabel(extra.title, t, language, extra.window.windowMinutes, extra.id) ||
+        extra.title,
       snap: extra.window,
       resetFormatMode: extra.id === "reset-credits" ? "expires" : "reset",
     });
   }
-  const visibleMetrics = compactMetrics ? metrics.slice(0, 2) : metrics;
+  const visibleMetrics = metrics
+    .filter((metric) => isUsageItemVisible(provider.hiddenUsageItemIds, metric.id))
+    .slice(0, compactOverview ? 2 : metrics.length);
 
   const presence = describeCard(
     provider,
@@ -232,6 +248,7 @@ export default function MenuCard({
     visibleMetrics,
     costSummaryDisplayStyle,
     showPace,
+    compactOverview,
   );
   const { hasDetails } = presence;
   const cardClassName = [
@@ -285,6 +302,13 @@ export default function MenuCard({
       {provider.providerId === "claude" && (
         <ClaudeAccountsMenu hideEmail={hideEmail} onLayoutChange={onLayoutChange} />
       )}
+      {provider.providerId === "grok" && (
+        <GrokAccountsMenu
+          hideEmail={hideEmail}
+          resetTimeRelative={resetTimeRelative}
+          onLayoutChange={onLayoutChange}
+        />
+      )}
 
       {hasDetails && <div className="menu-card__divider" />}
 
@@ -296,6 +320,7 @@ export default function MenuCard({
             showResetWhenExhausted,
             showPace,
             showAsUsed,
+            compactOverview,
             costSummaryDisplayStyle,
           }}
           metrics={visibleMetrics}

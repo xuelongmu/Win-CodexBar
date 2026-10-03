@@ -45,6 +45,7 @@ impl AzureOpenAIProvider {
                 is_primary: false,
                 dashboard_url: Some("https://ai.azure.com"),
                 status_page_url: Some("https://status.azure.com"),
+                tertiary_label_key: None,
             },
         }
     }
@@ -102,15 +103,49 @@ impl AzureOpenAIProvider {
 
     fn resolve_config(ctx: &FetchContext) -> Result<AzureOpenAIConfig, ProviderError> {
         if let Some(raw) = ctx.api_key.as_deref().and_then(clean_string) {
-            return Self::parse_saved_config(&raw);
+            let config = Self::parse_saved_config(&raw)?;
+            return Ok(Self::apply_saved_api_version(
+                config,
+                &raw,
+                ApiKeys::load().api_version("azureopenai"),
+            ));
         }
         if let Some(config) = Self::config_from_env()? {
             return Ok(config);
         }
         if let Some(raw) = ApiKeys::load().get("azureopenai") {
-            return Self::parse_saved_config(raw);
+            let config = Self::parse_saved_config(raw)?;
+            return Ok(Self::apply_saved_api_version(
+                config,
+                raw,
+                ApiKeys::load().api_version("azureopenai"),
+            ));
         }
         Err(ProviderError::AuthRequired)
+    }
+
+    fn apply_saved_api_version(
+        mut config: AzureOpenAIConfig,
+        raw: &str,
+        stored_api_version: Option<&str>,
+    ) -> AzureOpenAIConfig {
+        if !Self::has_explicit_api_version(raw)
+            && let Some(api_version) = stored_api_version.and_then(clean_string)
+        {
+            config.api_version = api_version;
+        }
+        config
+    }
+
+    fn has_explicit_api_version(raw: &str) -> bool {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            return value
+                .get("api_version")
+                .and_then(serde_json::Value::as_str)
+                .and_then(clean_string)
+                .is_some();
+        }
+        raw.split('|').nth(3).and_then(clean_string).is_some()
     }
 
     fn config_from_env() -> Result<Option<AzureOpenAIConfig>, ProviderError> {
@@ -235,12 +270,12 @@ impl AzureOpenAIProvider {
             serde_json::json!({
                 "model": deployment,
                 "messages": [{"role": "user", "content": "ping"}],
-                "max_completion_tokens": 1
+                "max_completion_tokens": 16
             })
         } else {
             serde_json::json!({
                 "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1
+                "max_tokens": 16
             })
         }
     }
@@ -358,9 +393,53 @@ mod tests {
     }
 
     #[test]
+    fn stored_api_version_overrides_missing_composite_version() {
+        let config =
+            AzureOpenAIProvider::parse_saved_config("key|example.openai.azure.com|chat-prod")
+                .unwrap();
+        let config = AzureOpenAIProvider::apply_saved_api_version(
+            config,
+            "key|example.openai.azure.com|chat-prod",
+            Some("v1"),
+        );
+        assert_eq!(config.api_version, "v1");
+    }
+
+    #[test]
+    fn explicit_saved_api_version_wins_over_picker_value() {
+        let raw = r#"{"api_key":"key","endpoint":"example.openai.azure.com","deployment":"chat-prod","api_version":"2024-10-21"}"#;
+        let config = AzureOpenAIProvider::parse_saved_config(raw).unwrap();
+        let config = AzureOpenAIProvider::apply_saved_api_version(config, raw, Some("v1"));
+        assert_eq!(config.api_version, "2024-10-21");
+    }
+
+    #[test]
     fn rejects_insecure_or_tricky_endpoint_overrides() {
         assert!(AzureOpenAIProvider::parse_endpoint("http://example.com").is_err());
         assert!(AzureOpenAIProvider::parse_endpoint("https://user@example.com").is_err());
         assert!(AzureOpenAIProvider::parse_endpoint("https://example.com%2f.evil.test").is_err());
+    }
+
+    #[test]
+    fn validation_bodies_use_sixteen_token_budget() {
+        let v1 = AzureOpenAIProvider::validation_body("reasoning-deployment", "v1");
+        assert_eq!(
+            v1.get("max_completion_tokens")
+                .and_then(|value| value.as_u64()),
+            Some(16)
+        );
+
+        let legacy = AzureOpenAIProvider::validation_body("reasoning-deployment", "2024-10-21");
+        assert_eq!(
+            legacy.get("max_tokens").and_then(|value| value.as_u64()),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn parses_success_response_containing_only_model() {
+        let response: ChatCompletionResponse =
+            serde_json::from_str(r#"{"model":"gpt-5"}"#).unwrap();
+        assert_eq!(response.model.as_deref(), Some("gpt-5"));
     }
 }

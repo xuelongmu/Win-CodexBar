@@ -1,13 +1,58 @@
 //! Claude Web API fetcher - uses browser cookies to fetch usage from claude.ai
 
 use chrono::{DateTime, Utc};
-use reqwest::{Client, header};
+use reqwest::{Client, StatusCode, header};
 use serde::Deserialize;
 
-use crate::browser::cookies::get_cookie_header;
 use crate::core::{
     CostSnapshot, NamedRateWindow, ProviderError, ProviderFetchResult, RateWindow, UsageSnapshot,
 };
+
+use super::CLOUDFLARE_CHALLENGE_MESSAGE;
+
+const CLOUDFLARE_BODY_PREFIX_BYTES: usize = 64 * 1024;
+
+fn is_cloudflare_challenge_response(
+    status: StatusCode,
+    headers: &header::HeaderMap,
+    body: &[u8],
+) -> bool {
+    if status != StatusCode::FORBIDDEN {
+        return false;
+    }
+
+    if headers
+        .get("cf-mitigated")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
+    {
+        return true;
+    }
+
+    let prefix = &body[..body.len().min(CLOUDFLARE_BODY_PREFIX_BYTES)];
+    std::str::from_utf8(prefix)
+        .ok()
+        .is_some_and(|text| text.to_ascii_lowercase().contains("just a moment"))
+}
+
+fn classify_web_http_error(
+    label: &str,
+    status: StatusCode,
+    headers: &header::HeaderMap,
+    body: &[u8],
+) -> ProviderError {
+    if status == StatusCode::UNAUTHORIZED {
+        return ProviderError::AuthRequired;
+    }
+    if status == StatusCode::FORBIDDEN {
+        if is_cloudflare_challenge_response(status, headers, body) {
+            return ProviderError::Other(CLOUDFLARE_CHALLENGE_MESSAGE.to_string());
+        }
+        return ProviderError::AuthRequired;
+    }
+    ProviderError::Other(format!("Failed to get {label}: {status}"))
+}
 
 /// Read the response body as text, then deserialize as JSON. On failure, include
 /// non-sensitive shape metadata so auth redirects, error envelopes, and schema
@@ -261,7 +306,6 @@ impl ClaudeWebApiFetcher {
             return self.fetch_with_cookie_header(&cookie_header).await;
         }
 
-        // Try multiple domains - Claude uses different domains for different services
         let domains = [
             "claude.ai",
             "claude.com",
@@ -269,22 +313,25 @@ impl ClaudeWebApiFetcher {
             "anthropic.com",
         ];
 
-        for domain in domains {
-            match get_cookie_header(domain) {
-                Ok(cookie_header) if !cookie_header.is_empty() => {
-                    tracing::debug!("Found cookies for {}", domain);
-                    return self.fetch_with_cookie_header(&cookie_header).await;
+        // A challenge is a network-path failure, not evidence that a cached
+        // session is invalid. Keep the last validated cookie for the next
+        // refresh and only invalidate it for an ordinary auth response.
+        use crate::browser::cookie_cache::CookieHeaderCache;
+        if let Some(cached) = CookieHeaderCache::load(crate::core::ProviderId::Claude) {
+            match self.fetch_with_cookie_header(&cached.cookie_header).await {
+                Ok(result) => return Ok(result),
+                Err(error) if is_cookie_authentication_failure(&error) => {
+                    CookieHeaderCache::clear(crate::core::ProviderId::Claude);
                 }
-                Ok(_) => {
-                    tracing::debug!("No cookies found for {}", domain);
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to get cookies for {}: {}", domain, e);
-                }
+                Err(error) => return Err(error),
             }
         }
 
-        Err(ProviderError::NoCookies)
+        let cookie_header = crate::providers::browser_cookie_header(&domains)?;
+        let result = self.fetch_with_cookie_header(&cookie_header).await?;
+        let _stored =
+            CookieHeaderCache::store(crate::core::ProviderId::Claude, &cookie_header, "browser");
+        Ok(result)
     }
 
     /// Fetch usage with a provided cookie header
@@ -325,7 +372,6 @@ impl ClaudeWebApiFetcher {
             snapshot = snapshot.with_model_specific(m);
         }
 
-        let show_routines = crate::settings::Settings::load().claude_daily_routines_usage_visible;
         append_web_extra_windows(
             &mut snapshot,
             usage
@@ -337,7 +383,6 @@ impl ClaudeWebApiFetcher {
                 .seven_day_routines
                 .as_ref()
                 .map(|w| self.to_rate_window(w, Some(10080))),
-            show_routines,
         );
 
         if let Some(acc) = &account {
@@ -470,11 +515,16 @@ impl ClaudeWebApiFetcher {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            return Err(ProviderError::Other(format!(
-                "Failed to get organizations: {}",
-                response.status()
-            )));
+        let status = response.status();
+        if !status.is_success() {
+            let response_headers = response.headers().clone();
+            let body = response.bytes().await?;
+            return Err(classify_web_http_error(
+                "organizations",
+                status,
+                &response_headers,
+                &body,
+            ));
         }
 
         let orgs: Vec<Organization> = parse_json_with_body(response, "organizations").await?;
@@ -500,11 +550,16 @@ impl ClaudeWebApiFetcher {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            return Err(ProviderError::Other(format!(
-                "Failed to get usage: {}",
-                response.status()
-            )));
+        let status = response.status();
+        if !status.is_success() {
+            let response_headers = response.headers().clone();
+            let body = response.bytes().await?;
+            return Err(classify_web_http_error(
+                "usage",
+                status,
+                &response_headers,
+                &body,
+            ));
         }
 
         parse_json_with_body(response, "usage").await
@@ -679,6 +734,10 @@ impl Default for ClaudeWebApiFetcher {
     }
 }
 
+fn is_cookie_authentication_failure(error: &ProviderError) -> bool {
+    matches!(error, ProviderError::AuthRequired)
+}
+
 fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
     cookie_header.split(';').find_map(|part| {
         let (key, value) = part.trim().split_once('=')?;
@@ -738,13 +797,12 @@ fn apply_prepaid_balance(balance: PrepaidBalance, existing: Option<CostSnapshot>
     }
 }
 
-/// Push extras in upstream order: oauth-apps → scoped weekly → routines (optional).
+/// Push extras in upstream order: oauth-apps → scoped weekly → routines when present.
 fn append_web_extra_windows(
     snapshot: &mut UsageSnapshot,
     oauth_apps: Option<RateWindow>,
     scoped_weekly: Vec<NamedRateWindow>,
     routines: Option<RateWindow>,
-    show_routines: bool,
 ) {
     if let Some(window) = oauth_apps {
         snapshot.extra_rate_windows.push(NamedRateWindow::new(
@@ -754,7 +812,7 @@ fn append_web_extra_windows(
         ));
     }
     snapshot.extra_rate_windows.extend(scoped_weekly);
-    if show_routines && let Some(window) = routines {
+    if let Some(window) = routines {
         snapshot.extra_rate_windows.push(NamedRateWindow::new(
             "claude-routines",
             "Daily Routines",
@@ -765,7 +823,12 @@ fn append_web_extra_windows(
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountResponse, ClaudeWebApiFetcher, UsageWindow, cookie_value};
+    use super::{
+        AccountResponse, ClaudeWebApiFetcher, UsageWindow, classify_web_http_error, cookie_value,
+        describe_json_body_shape, is_cookie_authentication_failure,
+    };
+    use crate::core::ProviderError;
+    use reqwest::StatusCode;
     use reqwest::header;
     use std::sync::{Mutex, OnceLock};
 
@@ -929,6 +992,45 @@ mod tests {
             Some("web_claude_ai")
         );
         assert!(headers.contains_key(header::USER_AGENT));
+    }
+
+    #[test]
+    fn stale_cookie_recovery_retries_only_after_authentication_failure() {
+        assert!(is_cookie_authentication_failure(
+            &ProviderError::AuthRequired
+        ));
+        assert!(!is_cookie_authentication_failure(&ProviderError::Timeout));
+        assert!(!is_cookie_authentication_failure(&ProviderError::Other(
+            "Failed to get organizations: 503 Service Unavailable".to_string(),
+        )));
+        assert!(!is_cookie_authentication_failure(&classify_web_http_error(
+            "organizations",
+            StatusCode::FORBIDDEN,
+            &header::HeaderMap::new(),
+            b"Just a moment...",
+        )));
+    }
+
+    #[test]
+    fn malformed_response_shape_does_not_echo_body_contents() {
+        let shape = describe_json_body_shape(
+            "sessionKey=secret-session-token",
+            Some("text/html; charset=utf-8"),
+        );
+
+        assert_eq!(
+            shape,
+            "content_type=text/html; charset=utf-8, body_len=31, body_kind=non-json"
+        );
+        assert!(!shape.contains("secret-session-token"));
+
+        let object_shape =
+            describe_json_body_shape(r#"{"z":"secret-value","a":true}"#, Some("application/json"));
+        assert_eq!(
+            object_shape,
+            "content_type=application/json, body_len=29, json_keys=[a, z]"
+        );
+        assert!(!object_shape.contains("secret-value"));
     }
 
     #[test]
@@ -1190,7 +1292,6 @@ mod tests {
                 RateWindow::new(2.0),
             )],
             Some(RateWindow::new(3.0)),
-            true,
         );
 
         let ids: Vec<&str> = snapshot
@@ -1209,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn web_extras_hide_routines_when_disabled() {
+    fn web_extras_keep_routines_in_raw_snapshot() {
         use crate::core::{NamedRateWindow, RateWindow, UsageSnapshot};
 
         let mut snapshot = UsageSnapshot::new(RateWindow::new(10.0));
@@ -1222,15 +1323,13 @@ mod tests {
                 RateWindow::new(2.0),
             )],
             Some(RateWindow::new(3.0)),
-            false,
         );
 
-        assert!(
-            snapshot
-                .extra_rate_windows
-                .iter()
-                .all(|w| w.id != "claude-routines")
-        );
-        assert_eq!(snapshot.extra_rate_windows.len(), 2);
+        assert_eq!(snapshot.extra_rate_windows.len(), 3);
+        assert_eq!(snapshot.extra_rate_windows[2].id, "claude-routines");
     }
 }
+
+#[cfg(test)]
+#[path = "cloudflare_tests.rs"]
+mod cloudflare_tests;

@@ -47,6 +47,8 @@ pub(super) struct RawSettings {
     #[serde(default = "default_true")]
     show_pace: bool,
     menu_bar_display_mode: String,
+    #[serde(default = "default_overview_layout")]
+    overview_layout: String,
     show_all_token_accounts_in_menu: bool,
 
     // ── New unified per-provider map ─────────────────────────────────
@@ -139,6 +141,8 @@ pub(super) struct RawSettings {
     #[serde(default = "default_tray_scale_percent")]
     tray_scale_percent: u16,
     #[serde(default)]
+    tray_panel_always_on_top: bool,
+    #[serde(default)]
     powertoys_status_pipe_enabled: bool,
 
     #[serde(default)]
@@ -212,6 +216,7 @@ impl Default for RawSettings {
             predictive_pace_warning_enabled: s.predictive_pace_warning_enabled,
             show_pace: s.show_pace,
             menu_bar_display_mode: s.menu_bar_display_mode,
+            overview_layout: s.overview_layout,
             show_all_token_accounts_in_menu: s.show_all_token_accounts_in_menu,
             provider_configs: s.provider_configs,
             claude_usage_source: None,
@@ -262,6 +267,7 @@ impl Default for RawSettings {
             theme: s.theme,
             window_scale_percent: s.window_scale_percent,
             tray_scale_percent: s.tray_scale_percent,
+            tray_panel_always_on_top: s.tray_panel_always_on_top,
             powertoys_status_pipe_enabled: s.powertoys_status_pipe_enabled,
             float_bar_enabled: s.float_bar_enabled,
             float_bar_opacity: s.float_bar_opacity,
@@ -537,6 +543,7 @@ impl From<RawSettings> for Settings {
             predictive_pace_warning_enabled: raw.predictive_pace_warning_enabled,
             show_pace: raw.show_pace,
             menu_bar_display_mode: raw.menu_bar_display_mode,
+            overview_layout: normalize_overview_layout(&raw.overview_layout),
             show_all_token_accounts_in_menu: raw.show_all_token_accounts_in_menu,
             provider_configs,
             disable_keychain_access: raw.disable_keychain_access,
@@ -563,6 +570,7 @@ impl From<RawSettings> for Settings {
             theme: raw.theme,
             window_scale_percent: clamp_window_scale_percent(raw.window_scale_percent),
             tray_scale_percent: clamp_tray_scale_percent(raw.tray_scale_percent),
+            tray_panel_always_on_top: raw.tray_panel_always_on_top,
             powertoys_status_pipe_enabled: raw.powertoys_status_pipe_enabled,
             float_bar_enabled: raw.float_bar_enabled,
             float_bar_opacity: clamp_float_bar_opacity(raw.float_bar_opacity),

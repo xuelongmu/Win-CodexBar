@@ -15,6 +15,10 @@ pub struct ApiKeyEntry {
     /// Optional label for the key (e.g., "Personal", "Work")
     #[serde(default)]
     pub label: Option<String>,
+    /// Azure OpenAI API-version override kept alongside the credential.
+    /// `None` inherits `AZURE_OPENAI_API_VERSION` and the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
 }
 
 impl ApiKeys {
@@ -57,14 +61,37 @@ impl ApiKeys {
     /// Set API key for a provider
     pub fn set(&mut self, provider_id: &str, api_key: &str, label: Option<&str>) {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+        let api_version = self
+            .keys
+            .get(provider_id)
+            .and_then(|entry| entry.api_version.clone());
         self.keys.insert(
             provider_id.to_string(),
             ApiKeyEntry {
                 api_key: api_key.to_string(),
                 saved_at: now,
                 label: label.map(|s| s.to_string()),
+                api_version,
             },
         );
+    }
+
+    /// Get a provider-specific API-version override, if one is stored.
+    pub fn api_version(&self, provider_id: &str) -> Option<&str> {
+        self.keys
+            .get(provider_id)
+            .and_then(|entry| entry.api_version.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Store or clear a provider-specific API-version override.
+    pub fn set_api_version(&mut self, provider_id: &str, api_version: Option<String>) {
+        if let Some(entry) = self.keys.get_mut(provider_id) {
+            entry.api_version = api_version
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
     }
 
     /// Remove API key for a provider
@@ -207,6 +234,19 @@ pub fn get_api_key_providers() -> Vec<ProviderConfigInfo> {
             dashboard_url: Some("https://ollama.com/settings"),
         },
         ProviderConfigInfo {
+            id: ProviderId::MiniMax,
+            name: "MiniMax",
+            requires_api_key: false,
+            api_key_env_var: Some("MINIMAX_API_KEY"),
+            api_key_help: Some(
+                "Optional: a MiniMax API key reads real coding-plan quota via the console's remains API, bypassing the client-rendered usage/plan pages that browser cookies alone cannot scrape.",
+            ),
+            config_file_path: None,
+            dashboard_url: Some(
+                "https://platform.minimax.io/user-center/basic-information/interface-key",
+            ),
+        },
+        ProviderConfigInfo {
             id: ProviderId::AzureOpenAI,
             name: "Azure OpenAI",
             requires_api_key: true,
@@ -262,7 +302,7 @@ pub fn get_api_key_providers() -> Vec<ProviderConfigInfo> {
             name: "Kilo",
             requires_api_key: true,
             api_key_env_var: Some("KILO_API_KEY"),
-            api_key_help: Some("Get your API key from Kilo, or sign in with Kilo CLI."),
+            api_key_help: Some("Get your API key from Kilo, or run `kilo auth login`."),
             config_file_path: Some("~/.local/share/kilo/auth.json"),
             dashboard_url: Some("https://app.kilo.ai/usage"),
         },
@@ -309,6 +349,30 @@ pub fn get_api_key_providers() -> Vec<ProviderConfigInfo> {
             ),
             config_file_path: None,
             dashboard_url: Some("https://deepinfra.com/dash"),
+        },
+        ProviderConfigInfo {
+            id: ProviderId::HuggingFace,
+            name: "Hugging Face",
+            requires_api_key: true,
+            api_key_env_var: Some(
+                "CODEXBAR_HUGGINGFACE_API_KEY / HF_TOKEN / HUGGING_FACE_HUB_TOKEN",
+            ),
+            api_key_help: Some(
+                "Add a Hugging Face access token here, set HF_TOKEN, or run `hf auth login`.",
+            ),
+            config_file_path: None,
+            dashboard_url: Some("https://huggingface.co/settings/billing"),
+        },
+        ProviderConfigInfo {
+            id: ProviderId::V0,
+            name: "v0",
+            requires_api_key: true,
+            api_key_env_var: Some("V0_API_KEY"),
+            api_key_help: Some(
+                "Add a v0 Platform API key. An optional scope can use the provider workspace field or V0_SCOPE.",
+            ),
+            config_file_path: None,
+            dashboard_url: Some("https://v0.app/chat/settings/billing"),
         },
         ProviderConfigInfo {
             id: ProviderId::Fireworks,
@@ -555,5 +619,40 @@ pub fn get_api_key_providers() -> Vec<ProviderConfigInfo> {
             config_file_path: Some("%USERPROFILE%\\.factory\\.env"),
             dashboard_url: Some("https://app.factory.ai/settings/api-keys"),
         },
+        ProviderConfigInfo {
+            id: ProviderId::Meta,
+            name: "Meta",
+            requires_api_key: true,
+            api_key_env_var: Some("MODEL_API_KEY / META_API_KEY"),
+            api_key_help: Some("Create key in Meta Model API dashboard"),
+            config_file_path: None,
+            dashboard_url: Some("https://dev.meta.ai/docs"),
+        },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiKeys;
+
+    #[test]
+    fn api_version_survives_api_key_update() {
+        let mut keys = ApiKeys::default();
+        keys.set("azureopenai", "key", Some("work"));
+        keys.set_api_version("azureopenai", Some("v1".to_string()));
+        keys.set("azureopenai", "new-key", None);
+
+        assert_eq!(keys.get("azureopenai"), Some("new-key"));
+        assert_eq!(keys.api_version("azureopenai"), Some("v1"));
+    }
+
+    #[test]
+    fn clearing_api_version_removes_the_override() {
+        let mut keys = ApiKeys::default();
+        keys.set("azureopenai", "key", None);
+        keys.set_api_version("azureopenai", Some("2025-01-01".to_string()));
+        keys.set_api_version("azureopenai", None);
+
+        assert_eq!(keys.api_version("azureopenai"), None);
+    }
 }

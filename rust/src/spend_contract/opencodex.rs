@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,8 +8,8 @@ use serde_json::Value;
 use crate::core::CostUsagePricing;
 
 use super::{
-    CostCoverageCounts, CustomPricing, ImportedSpendSource, SpendActivityCell, SpendDailyPoint,
-    SpendModelRow, SpendTokenMix,
+    CostCoverageCounts, CostProvenance, CustomPricing, ImportedSpendSource, SpendActivityCell,
+    SpendDailyPoint, SpendModelRow, SpendTokenMix,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,13 +28,7 @@ struct OpenCodexEntry {
     total_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheFile {
-    source_path: String,
-    source_len: u64,
-    source_modified_ms: u64,
-    entries: Vec<OpenCodexEntry>,
-}
+mod cache;
 
 #[derive(Default)]
 struct ModelAccumulator {
@@ -88,7 +80,11 @@ fn route_model(model: &str) -> RouteTarget {
 }
 
 fn route_entry(entry: &OpenCodexEntry) -> RouteTarget {
-    if entry.model.trim().contains('/') {
+    // OpenCodex normally records the billing provider separately from the model
+    // namespace. Only the historical OpenAI transport format used the model
+    // prefix as an explicit route; never let another provider's namespace
+    // override its recorded provider.
+    if entry.provider.trim().eq_ignore_ascii_case("openai") && entry.model.trim().contains('/') {
         let routed = route_model(&entry.model);
         if routed != RouteTarget::Unknown {
             return routed;
@@ -103,7 +99,7 @@ pub(super) fn load_for_subscription(
     custom: &CustomPricing,
 ) -> Option<ImportedSpendSource> {
     let source_path = usage_path()?;
-    let entries = load_entries(&source_path)?;
+    let entries = cache::load_entries(&source_path)?;
     let entries = entries
         .into_iter()
         .filter(|entry| matches!(route_entry(entry), RouteTarget::Subscription(id) if id == provider_id))
@@ -149,6 +145,9 @@ fn aggregate(
     let mut daily: BTreeMap<String, DailyAccumulator> = BTreeMap::new();
     let mut known_cost = 0.0;
     let mut saw_known_cost = false;
+    let mut saw_vendor_provenance = false;
+    let mut saw_list_provenance = false;
+    let mut saw_metered_cost = false;
     // Upstream 0.55.0 #3136: resolve the dynamic pricing catalog once per
     // aggregate instead of re-checking its cache metadata for every usage row.
     let pricing_snapshot = crate::core::pricing_snapshot();
@@ -168,6 +167,11 @@ fn aggregate(
 
         let cost = entry_cost(entry, custom, &pricing_snapshot);
         match entry.usage_status.as_str() {
+            "reported" => saw_vendor_provenance = true,
+            "estimated" => saw_list_provenance = true,
+            _ => {}
+        }
+        match entry.usage_status.as_str() {
             "reported" if cost.is_some() => coverage.priced = coverage.priced.saturating_add(1),
             "estimated" if cost.is_some() => {
                 coverage.estimated = coverage.estimated.saturating_add(1)
@@ -178,6 +182,9 @@ fn aggregate(
         if let Some(cost) = cost {
             known_cost += cost;
             saw_known_cost = true;
+            if entry.usage_status == "reported" {
+                saw_metered_cost = true;
+            }
         }
 
         let local = entry.timestamp.with_timezone(&Local);
@@ -265,12 +272,18 @@ fn aggregate(
     )]
     let conversation_count = conversations.len().min(u32::MAX as usize) as u32;
 
+    let snapshot_provenance =
+        CostProvenance::from_source_kinds(saw_vendor_provenance, saw_list_provenance);
+    let provenance =
+        CostProvenance::for_window(snapshot_provenance, saw_known_cost, saw_metered_cost);
+
     Some(ImportedSpendSource {
         source_id: "opencodex".to_string(),
         display_name: "OpenCodex".to_string(),
         request_count,
         conversation_count,
         known_cost_usd: saw_known_cost.then_some(known_cost),
+        provenance,
         token_mix,
         coverage,
         models: model_rows,
@@ -330,89 +343,37 @@ fn entry_cost(
 fn pricing_model(entry: &OpenCodexEntry) -> Option<String> {
     let target = route_entry(entry);
     let model = entry.model.trim();
-    let model_tail = model.split_once('/').map(|(_, tail)| tail).unwrap_or(model);
     match target {
-        RouteTarget::Subscription("codex") => Some(
-            if model.contains('/')
-                && model
-                    .split_once('/')
-                    .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case("openai"))
-            {
-                model.to_string()
-            } else {
-                model_tail.to_string()
-            },
-        ),
-        RouteTarget::Subscription("opencodego") => Some(format!("opencode/{model_tail}")),
-        RouteTarget::Subscription("kimi") => Some(format!("kimi/{model_tail}")),
-        RouteTarget::Subscription("deepseek") => Some(format!("deepseek/{model_tail}")),
+        RouteTarget::Subscription("codex") => Some(model.to_string()),
+        RouteTarget::Subscription("opencodego") => {
+            Some(format!("opencode/{}", provider_model_id(entry, target)))
+        }
+        RouteTarget::Subscription("kimi") => {
+            Some(format!("kimi/{}", provider_model_id(entry, target)))
+        }
+        RouteTarget::Subscription("deepseek") => {
+            Some(format!("deepseek/{}", provider_model_id(entry, target)))
+        }
         RouteTarget::Subscription(_) | RouteTarget::TokenOnly | RouteTarget::Unknown => None,
     }
 }
 
-fn load_entries(source_path: &Path) -> Option<Vec<OpenCodexEntry>> {
-    let metadata = fs::metadata(source_path).ok()?;
-    let source_len = metadata.len();
-    // Modified time is clamped to u64::MAX before casting.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "clamped to u64::MAX before casting"
-    )]
-    let source_modified_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|value| value.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0);
-    let source_path_text = source_path.to_string_lossy().to_string();
-
-    if let Some(cache) = read_cache()
-        && cache.source_path == source_path_text
-        && cache.source_len == source_len
-        && cache.source_modified_ms == source_modified_ms
-    {
-        return Some(cache.entries);
+fn provider_model_id(entry: &OpenCodexEntry, target: RouteTarget) -> String {
+    let model = entry.model.trim();
+    let Some((model_prefix, model_tail)) = model.split_once('/') else {
+        return model.to_string();
+    };
+    let recorded_provider = entry.provider.trim();
+    let prefix_matches_recorded_provider = model_prefix.eq_ignore_ascii_case(recorded_provider)
+        || (recorded_provider.eq_ignore_ascii_case("kimi-for-coding")
+            && model_prefix.eq_ignore_ascii_case("kimi-coding"));
+    let is_legacy_openai_route =
+        recorded_provider.eq_ignore_ascii_case("openai") && route_provider(model_prefix) == target;
+    if prefix_matches_recorded_provider || is_legacy_openai_route {
+        model_tail.to_string()
+    } else {
+        model.to_string()
     }
-
-    let text = fs::read_to_string(source_path).ok()?;
-    let entries: Vec<_> = text.lines().filter_map(parse_line).collect();
-    write_cache(&CacheFile {
-        source_path: source_path_text,
-        source_len,
-        source_modified_ms,
-        entries: entries.clone(),
-    });
-    Some(entries)
-}
-
-fn cache_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|root| {
-        root.join("openCodexBar")
-            .join("opencodex")
-            .join("usage-cache.json")
-    })
-}
-
-fn read_cache() -> Option<CacheFile> {
-    let bytes = fs::read(cache_path()?).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn write_cache(cache: &CacheFile) {
-    let Some(path) = cache_path() else {
-        return;
-    };
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let Ok(bytes) = serde_json::to_vec(cache) else {
-        return;
-    };
-    // Best-effort cache write; a failed write is non-fatal.
-    let _written = fs::write(path, bytes);
 }
 
 fn usage_path() -> Option<PathBuf> {
@@ -558,7 +519,10 @@ fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CustomRates;
+    use super::cache::{load_entries_with_cache, read_cache};
     use super::*;
+    use std::fs;
 
     #[test]
     fn aggregate_deduplicates_requests_and_applies_history_window() {
@@ -597,6 +561,61 @@ mod tests {
         assert_eq!(source.token_mix.input_tokens, Some(20));
         assert_eq!(source.coverage.priced, 1);
         assert!(source.known_cost_usd.is_some());
+        assert_eq!(source.provenance, CostProvenance::VendorMetered);
+    }
+
+    #[test]
+    fn aggregate_preserves_list_and_mixed_provenance() {
+        let now = DateTime::parse_from_rfc3339("2026-08-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut estimated = entry("openai", "gpt-5");
+        estimated.request_id = "estimated".to_string();
+        estimated.usage_status = "estimated".to_string();
+        let list_only = aggregate(vec![estimated.clone()], now, 30, &CustomPricing::default())
+            .expect("list-price source");
+        assert_eq!(list_only.provenance, CostProvenance::ListPriceEstimate);
+
+        let mut reported = entry("openai", "gpt-5");
+        reported.request_id = "reported".to_string();
+        let mixed = aggregate(
+            vec![reported, estimated],
+            now,
+            30,
+            &CustomPricing::default(),
+        )
+        .expect("mixed source");
+        assert_eq!(mixed.provenance, CostProvenance::Mixed);
+    }
+
+    #[test]
+    fn aggregate_preserves_zero_cost_authoritative_provenance() {
+        let now = DateTime::parse_from_rfc3339("2026-08-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let custom = CustomPricing {
+            entries: std::collections::HashMap::from([(
+                "openai/gpt-5".to_string(),
+                CustomRates {
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    cache_read: Some(0.0),
+                    cache_write: Some(0.0),
+                },
+            )]),
+        };
+
+        let reported = aggregate(vec![entry("openai", "gpt-5")], now, 30, &custom)
+            .expect("zero-cost vendor source");
+        assert_eq!(reported.known_cost_usd, Some(0.0));
+        assert_eq!(reported.provenance, CostProvenance::VendorMetered);
+
+        let mut estimated_entry = entry("openai", "gpt-5");
+        estimated_entry.usage_status = "estimated".to_string();
+        let estimated =
+            aggregate(vec![estimated_entry], now, 30, &custom).expect("zero-cost list source");
+        assert_eq!(estimated.known_cost_usd, Some(0.0));
+        assert_eq!(estimated.provenance, CostProvenance::ListPriceEstimate);
     }
 
     fn entry(provider: &str, model: &str) -> OpenCodexEntry {
@@ -643,14 +662,26 @@ mod tests {
     }
 
     #[test]
-    fn model_prefix_wins_over_mismatched_provider_label() {
+    fn recorded_provider_wins_over_mismatched_model_namespace() {
+        assert_eq!(
+            route_entry(&entry("opencode-go", "openai/gpt-5.6-sol")),
+            RouteTarget::Subscription("opencodego")
+        );
+        assert_eq!(
+            route_entry(&entry("deepseek", "openai/gpt-5.6-sol")),
+            RouteTarget::Subscription("deepseek")
+        );
+    }
+
+    #[test]
+    fn legacy_openai_transport_still_uses_explicit_route() {
         assert_eq!(
             route_entry(&entry("openai", "opencode-go/deepseek-v4-flash")),
             RouteTarget::Subscription("opencodego")
         );
         assert_eq!(
-            route_entry(&entry("opencode-go", "openai/gpt-5.6-sol")),
-            RouteTarget::Subscription("codex")
+            pricing_model(&entry("openai", "opencode-go/gpt-5")),
+            Some("opencode/gpt-5".to_string())
         );
     }
 
@@ -667,6 +698,27 @@ mod tests {
         assert_eq!(
             pricing_model(&entry("deepseek", "deepseek-chat")).as_deref(),
             Some("deepseek/deepseek-chat")
+        );
+        assert_eq!(
+            pricing_model(&entry("opencode-go", "openai/gpt-5")),
+            Some("opencode/openai/gpt-5".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_provider_or_namespace_fails_closed_for_routing_and_pricing() {
+        assert_eq!(
+            route_entry(&entry("private-proxy", "openai/gpt-5")),
+            RouteTarget::Unknown
+        );
+        assert_eq!(pricing_model(&entry("private-proxy", "openai/gpt-5")), None);
+        assert_eq!(
+            route_entry(&entry("openai", "/gpt-5")),
+            RouteTarget::Subscription("codex")
+        );
+        assert_eq!(
+            pricing_model(&entry("openai", "/gpt-5")),
+            Some("/gpt-5".to_string())
         );
     }
 
@@ -722,6 +774,168 @@ mod tests {
         ] {
             assert!(parse_line(malformed).is_none(), "rejected: {malformed}");
         }
+    }
+
+    #[test]
+    fn incremental_cache_appends_only_newline_terminated_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let cache = dir.path().join("cache.sqlite");
+        let row = |id: &str, input: u64| {
+            format!(
+                r#"{{"requestId":"{id}","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z","usageStatus":"reported","usage":{{"inputTokens":{input}}}}}"#
+            )
+        };
+
+        fs::write(&log, format!("{}\n{}\n", row("a", 1), row("b", 2))).unwrap();
+        let first = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        let first_cursor = read_cache(&cache).unwrap().cursor;
+
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        use std::io::Write as _;
+        writeln!(file, "{}", row("c", 3)).unwrap();
+        drop(file);
+
+        let second = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        let second_cursor = read_cache(&cache).unwrap().cursor;
+        assert!(second_cursor.parsed_offset > first_cursor.parsed_offset);
+    }
+
+    #[test]
+    fn incomplete_trailing_opencodex_record_waits_for_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let cache = dir.path().join("cache.sqlite");
+        let complete = r#"{"requestId":"a","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        let pending = r#"{"requestId":"b","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        let split = pending.len() / 2;
+        fs::write(&log, format!("{complete}\n{}", &pending[..split])).unwrap();
+
+        let first = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        let cursor = read_cache(&cache).unwrap().cursor;
+        assert_eq!(
+            cursor.parsed_offset,
+            u64::try_from(complete.len() + 1).unwrap()
+        );
+
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        use std::io::Write as _;
+        writeln!(file, "{}", &pending[split..]).unwrap();
+        drop(file);
+        let second = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn complete_trailing_opencodex_record_waits_for_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let cache = dir.path().join("cache.sqlite");
+        let first = r#"{"requestId":"a","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        let trailing = r#"{"requestId":"b","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        fs::write(&log, format!("{first}\n{trailing}")).unwrap();
+
+        let before_newline = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            before_newline
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        use std::io::Write as _;
+        writeln!(file).unwrap();
+        drop(file);
+
+        let after_newline = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            after_newline
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn later_request_id_replaces_cached_entry_without_full_cache_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let cache = dir.path().join("cache.sqlite");
+        let row = |id: &str, input: u64| {
+            format!(
+                r#"{{"requestId":"{id}","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z","usageStatus":"reported","usage":{{"inputTokens":{input}}}}}"#
+            )
+        };
+        fs::write(&log, format!("{}\n{}\n", row("dup", 1), row("keep", 2))).unwrap();
+        let _ = load_entries_with_cache(&log, &cache).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        use std::io::Write as _;
+        writeln!(file, "{}", row("dup", 9)).unwrap();
+        drop(file);
+
+        let entries = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.request_id == "dup")
+                .unwrap()
+                .input_tokens,
+            Some(9)
+        );
+        assert!(entries.iter().any(|entry| entry.request_id == "keep"));
+    }
+
+    #[test]
+    fn truncation_invalidates_opencodex_cursor_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let cache = dir.path().join("cache.sqlite");
+        let old = r#"{"requestId":"old","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        let replacement =
+            r#"{"requestId":"new","model":"gpt-5","timestamp":"2026-08-18T10:00:00Z"}"#;
+        fs::write(&log, format!("{old}\n{old}\n")).unwrap();
+        let _ = load_entries_with_cache(&log, &cache).unwrap();
+        fs::write(&log, format!("{replacement}\n")).unwrap();
+
+        let rebuilt = load_entries_with_cache(&log, &cache).unwrap();
+        assert_eq!(
+            rebuilt
+                .iter()
+                .map(|entry| entry.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new"]
+        );
     }
 
     #[test]

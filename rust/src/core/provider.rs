@@ -14,6 +14,7 @@ use super::provider_state::ProviderStateKind;
 pub enum ProviderId {
     Codex,
     Claude,
+    Pi,
     Cursor,
     Factory,
     Gemini,
@@ -45,6 +46,7 @@ pub enum ProviderId {
     Kilo,
     Bedrock,
     Codebuff,
+    CodeRabbit,
     DeepSeek,
     DeepInfra,
     AiAnd,
@@ -61,6 +63,10 @@ pub enum ProviderId {
     ElevenLabs,
     Deepgram,
     Groq,
+    HuggingFace,
+    Helmcode,
+    V0,
+    TypeSafe,
     LLMProxy,
     Chutes,
     LiteLLM,
@@ -82,6 +88,11 @@ pub enum ProviderId {
     Notion,
     Xai,
     Fireworks,
+    #[serde(alias = "metaspark")]
+    Meta,
+    Muse,
+    Replicate,
+    Nous,
 }
 
 impl ProviderId {
@@ -90,6 +101,7 @@ impl ProviderId {
         &[
             ProviderId::Codex,
             ProviderId::Claude,
+            ProviderId::Pi,
             ProviderId::Cursor,
             ProviderId::Factory,
             ProviderId::Gemini,
@@ -121,6 +133,7 @@ impl ProviderId {
             ProviderId::Kilo,
             ProviderId::Bedrock,
             ProviderId::Codebuff,
+            ProviderId::CodeRabbit,
             ProviderId::DeepSeek,
             ProviderId::DeepInfra,
             ProviderId::AiAnd,
@@ -137,6 +150,10 @@ impl ProviderId {
             ProviderId::ElevenLabs,
             ProviderId::Deepgram,
             ProviderId::Groq,
+            ProviderId::HuggingFace,
+            ProviderId::Helmcode,
+            ProviderId::V0,
+            ProviderId::TypeSafe,
             ProviderId::LLMProxy,
             ProviderId::Chutes,
             ProviderId::LiteLLM,
@@ -158,6 +175,10 @@ impl ProviderId {
             ProviderId::Notion,
             ProviderId::Xai,
             ProviderId::Fireworks,
+            ProviderId::Meta,
+            ProviderId::Muse,
+            ProviderId::Replicate,
+            ProviderId::Nous,
         ]
     }
 
@@ -166,6 +187,7 @@ impl ProviderId {
         match self {
             ProviderId::Codex => "codex",
             ProviderId::Claude => "claude",
+            ProviderId::Pi => "pi",
             ProviderId::Cursor => "cursor",
             ProviderId::Factory => "factory",
             ProviderId::Gemini => "gemini",
@@ -197,9 +219,13 @@ impl ProviderId {
             ProviderId::Kilo => "kilo",
             ProviderId::Bedrock => "bedrock",
             ProviderId::Codebuff => "codebuff",
+            ProviderId::CodeRabbit => "coderabbit",
             ProviderId::DeepSeek => "deepseek",
             ProviderId::DeepInfra => "deepinfra",
             ProviderId::Fireworks => "fireworks",
+            ProviderId::Meta => "meta",
+            ProviderId::Muse => "muse",
+            ProviderId::Nous => "nous",
             ProviderId::AiAnd => "aiand",
             ProviderId::Windsurf => "windsurf",
             ProviderId::Manus => "manus",
@@ -214,6 +240,10 @@ impl ProviderId {
             ProviderId::ElevenLabs => "elevenlabs",
             ProviderId::Deepgram => "deepgram",
             ProviderId::Groq => "groq",
+            ProviderId::HuggingFace => "huggingface",
+            ProviderId::Helmcode => "helmcode",
+            ProviderId::V0 => "v0",
+            ProviderId::TypeSafe => "typesafe",
             ProviderId::LLMProxy => "llmproxy",
             ProviderId::Chutes => "chutes",
             ProviderId::LiteLLM => "litellm",
@@ -234,6 +264,7 @@ impl ProviderId {
             ProviderId::QwenCloud => "qwen-cloud",
             ProviderId::Notion => "notion",
             ProviderId::Xai => "xai",
+            ProviderId::Replicate => "replicate",
         }
     }
 
@@ -242,6 +273,7 @@ impl ProviderId {
         match self {
             ProviderId::Codex => "Codex",
             ProviderId::Claude => "Claude",
+            ProviderId::Pi => "Pi",
             ProviderId::Cursor => "Cursor",
             ProviderId::Factory => "Factory",
             ProviderId::Gemini => "Gemini",
@@ -274,9 +306,13 @@ impl ProviderId {
             ProviderId::Kilo => "Kilo",
             ProviderId::Bedrock => "AWS Bedrock",
             ProviderId::Codebuff => "Codebuff",
+            ProviderId::CodeRabbit => "CodeRabbit",
             ProviderId::DeepSeek => "DeepSeek",
             ProviderId::DeepInfra => "DeepInfra",
             ProviderId::Fireworks => "Fireworks",
+            ProviderId::Meta => "Meta",
+            ProviderId::Muse => "Muse Code",
+            ProviderId::Nous => "Nous Portal",
             ProviderId::AiAnd => "ai&",
             ProviderId::Windsurf => "Windsurf",
             ProviderId::Manus => "Manus",
@@ -291,6 +327,10 @@ impl ProviderId {
             ProviderId::ElevenLabs => "ElevenLabs",
             ProviderId::Deepgram => "Deepgram",
             ProviderId::Groq => "Groq",
+            ProviderId::HuggingFace => "Hugging Face",
+            ProviderId::Helmcode => "Helmcode",
+            ProviderId::V0 => "v0",
+            ProviderId::TypeSafe => "TypeSafe",
             ProviderId::LLMProxy => "LLM Proxy",
             ProviderId::Chutes => "Chutes",
             ProviderId::LiteLLM => "LiteLLM",
@@ -312,6 +352,7 @@ impl ProviderId {
             ProviderId::QwenCloud => "Qwen Cloud",
             ProviderId::Notion => "Notion AI",
             ProviderId::Xai => "xAI",
+            ProviderId::Replicate => "Replicate",
         }
     }
 
@@ -324,6 +365,7 @@ impl ProviderId {
             ProviderId::Cursor => Some("cursor.com"),
             ProviderId::Factory => Some("app.factory.ai"),
             ProviderId::Codex => Some("chatgpt.com"),
+            ProviderId::Pi => None,
             ProviderId::Gemini => Some("aistudio.google.com"),
             ProviderId::Kiro => Some("kiro.dev"),
             ProviderId::Kimi => Some("kimi.moonshot.cn"),
@@ -347,10 +389,12 @@ impl ProviderId {
             ProviderId::MiMo => Some("platform.xiaomimimo.com"),
             ProviderId::CommandCode => Some("commandcode.ai"),
             ProviderId::Grok => Some("grok.com"),
+            ProviderId::Venice => Some("venice.ai"),
             ProviderId::Qoder => Some("qoder.com"),
             ProviderId::CodeBuddy => Some("codebuddy.cn"),
             ProviderId::Sakana => Some("console.sakana.ai"),
             ProviderId::LongCat => Some("longcat.chat"),
+            ProviderId::Replicate => Some("replicate.com"),
             // Token-based providers (don't use cookies)
             ProviderId::Copilot => None,
             ProviderId::Zai => None,
@@ -364,19 +408,26 @@ impl ProviderId {
             ProviderId::Kilo => None,
             ProviderId::Bedrock => None,
             ProviderId::Codebuff => None,
+            ProviderId::CodeRabbit => None,
             ProviderId::DeepSeek => None,
             ProviderId::DeepInfra => None,
             ProviderId::Fireworks => None,
+            ProviderId::Meta => None,
+            ProviderId::Muse => None,
+            ProviderId::Nous => None,
             ProviderId::AiAnd => None,
             ProviderId::Windsurf => None,
             ProviderId::Doubao => None,
             ProviderId::Crof => None,
             ProviderId::StepFun => None,
-            ProviderId::Venice => None,
             ProviderId::OpenAIApi => None,
             ProviderId::ElevenLabs => None,
             ProviderId::Deepgram => None,
             ProviderId::Groq => None,
+            ProviderId::HuggingFace => None,
+            ProviderId::Helmcode => Some("helmcode.com"),
+            ProviderId::TypeSafe => Some("typesafe.ai"),
+            ProviderId::V0 => None,
             ProviderId::LLMProxy => None,
             ProviderId::Chutes => None,
             ProviderId::LiteLLM => None,
@@ -401,6 +452,7 @@ impl ProviderId {
         match name.to_lowercase().as_str() {
             "codex" | "openai" => Some(ProviderId::Codex),
             "claude" | "anthropic" => Some(ProviderId::Claude),
+            "pi" | "pi-mono" => Some(ProviderId::Pi),
             "cursor" => Some(ProviderId::Cursor),
             "factory" | "droid" => Some(ProviderId::Factory),
             "gemini" | "google" => Some(ProviderId::Gemini),
@@ -437,9 +489,14 @@ impl ProviderId {
             "kilo" => Some(ProviderId::Kilo),
             "bedrock" | "aws-bedrock" | "aws bedrock" => Some(ProviderId::Bedrock),
             "codebuff" | "manicode" => Some(ProviderId::Codebuff),
+            "coderabbit" | "code-rabbit" | "code rabbit" => Some(ProviderId::CodeRabbit),
             "deepseek" | "deep-seek" | "ds" => Some(ProviderId::DeepSeek),
             "deepinfra" | "deep-infra" | "di" => Some(ProviderId::DeepInfra),
             "fireworks" | "fireworks-ai" | "fw" => Some(ProviderId::Fireworks),
+            "muse" | "muse-code" | "muse code" => Some(ProviderId::Muse),
+            "nous" | "nous-portal" | "nous portal" | "hermes" => Some(ProviderId::Nous),
+            "meta" | "metaspark" | "meta-spark" | "muse-spark" | "musespark" | "muse spark"
+            | "meta muse spark" => Some(ProviderId::Meta),
             "aiand" | "ai&" | "ai-and" | "ai and" => Some(ProviderId::AiAnd),
             "windsurf" | "codeium" => Some(ProviderId::Windsurf),
             "manus" => Some(ProviderId::Manus),
@@ -459,6 +516,10 @@ impl ProviderId {
             "elevenlabs" | "eleven-labs" | "11labs" => Some(ProviderId::ElevenLabs),
             "deepgram" | "dg" => Some(ProviderId::Deepgram),
             "groq" | "groqcloud" | "groq-cloud" | "groq cloud" => Some(ProviderId::Groq),
+            "huggingface" | "hugging-face" | "hugging face" | "hf" => Some(ProviderId::HuggingFace),
+            "helmcode" | "nan-builders" | "nan builders" => Some(ProviderId::Helmcode),
+            "v0" | "v0-dev" | "v0.dev" => Some(ProviderId::V0),
+            "typesafe" | "type-safe" | "type safe" => Some(ProviderId::TypeSafe),
             "llmproxy" | "llm-proxy" | "llm proxy" => Some(ProviderId::LLMProxy),
             "chutes" | "chutes-ai" | "chutes ai" => Some(ProviderId::Chutes),
             "litellm" | "lite-llm" | "lite llm" => Some(ProviderId::LiteLLM),
@@ -484,6 +545,7 @@ impl ProviderId {
             }
             "zoommate" | "zoom-mate" | "zoom mate" => Some(ProviderId::ZoomMate),
             "notion" | "notion-ai" | "notionai" | "notion ai" => Some(ProviderId::Notion),
+            "replicate" | "r8" => Some(ProviderId::Replicate),
             _ => None,
         }
     }
@@ -504,12 +566,17 @@ impl std::fmt::Display for ProviderId {
 }
 
 /// Data source mode for fetching usage
+///
+/// Conventions for providers whose transport is not an OAuth flow: they
+/// reuse `OAuth` as the persisted token/API lane (an API key, hub token, or
+/// other credential), because the source enum is shared with the settings
+/// UI. `Auto` may dispatch to that lane as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceMode {
     /// Automatically choose the best available source
     #[default]
     Auto,
-    /// Use OAuth API
+    /// Use OAuth API; also the token/API lane for non-OAuth providers
     OAuth,
     /// Use web API with browser cookies
     Web,
@@ -542,6 +609,10 @@ pub struct ProviderMetadata {
     pub is_primary: bool,
     pub dashboard_url: Option<&'static str>,
     pub status_page_url: Option<&'static str>,
+    /// Locale key shown for the provider's tertiary metric lane in settings
+    /// pickers when the lane carries a semantic identity beyond "Tertiary"
+    /// (upstream F5). `None` renders the generic tertiary label.
+    pub tertiary_label_key: Option<&'static str>,
 }
 
 /// Errors that can occur when fetching provider data
@@ -555,6 +626,9 @@ pub enum ProviderError {
 
     #[error("OAuth error: {0}")]
     OAuth(String),
+
+    #[error("Transient OAuth error: {0}")]
+    OAuthTransient(String),
 
     #[error("OAuth session expired: {0}")]
     OAuthExpired(String),
@@ -581,6 +655,79 @@ pub enum ProviderError {
     Other(String),
 }
 
+impl ProviderError {
+    /// Return true only for transport failures safe for last-good retention.
+    pub fn is_transport_failure(&self) -> bool {
+        match self {
+            ProviderError::Network(error) => matches!(
+                classify_reqwest_error(error),
+                ReqwestFailureClass::Timeout | ReqwestFailureClass::Connect
+            ),
+            ProviderError::Timeout => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReqwestFailureClass {
+    Timeout,
+    Connect,
+    Terminal,
+}
+
+fn classify_reqwest_error(error: &reqwest::Error) -> ReqwestFailureClass {
+    // A response-body failure can also carry the timeout flag when the peer
+    // stalls while the body is being read. It is terminal for the snapshot,
+    // because retaining last-good data would hide a truncated response.
+    if error.is_body() || error.is_decode() {
+        return ReqwestFailureClass::Terminal;
+    }
+    if error.is_timeout() {
+        return ReqwestFailureClass::Timeout;
+    }
+    if !error.is_connect() {
+        return ReqwestFailureClass::Terminal;
+    }
+
+    // A connect classification alone is too broad: it also covers protocol
+    // and TLS-handshake failures. Retain only a typed transient socket error.
+    if has_io_error_kind(error, std::io::ErrorKind::ConnectionRefused) {
+        return ReqwestFailureClass::Connect;
+    }
+
+    ReqwestFailureClass::Terminal
+}
+
+fn has_io_error_kind(error: &reqwest::Error, kind: std::io::ErrorKind) -> bool {
+    fn contains_kind(
+        source: Option<&(dyn std::error::Error + 'static)>,
+        kind: std::io::ErrorKind,
+    ) -> bool {
+        let Some(current) = source else {
+            return false;
+        };
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            if io_error.kind() == kind {
+                return true;
+            }
+            let mut nested = io_error.get_ref();
+            while let Some(inner) = nested {
+                let Some(inner_io) = inner.downcast_ref::<std::io::Error>() else {
+                    break;
+                };
+                if inner_io.kind() == kind {
+                    return true;
+                }
+                nested = inner_io.get_ref();
+            }
+        }
+        contains_kind(std::error::Error::source(current), kind)
+    }
+
+    contains_kind(std::error::Error::source(error), kind)
+}
+
 /// Context passed to provider fetch operations
 #[derive(Debug, Clone)]
 pub struct FetchContext {
@@ -599,11 +746,20 @@ pub struct FetchContext {
     /// Manual cookie header (for testing)
     pub manual_cookie_header: Option<String>,
 
+    /// The cookie source is manual and no cookie is stored. The provider
+    /// decides what this means; Replicate fails closed instead of importing a
+    /// browser account the user did not select.
+    pub manual_cookie_missing: bool,
+
     /// API key for providers that require authentication
     pub api_key: Option<String>,
 
     /// Optional provider workspace/project scope from persisted settings.
     pub workspace_id: Option<String>,
+
+    /// Optional Copilot seat AI-credit allowance supplied by the app settings.
+    /// The provider keeps the credit counter unknown when this is absent.
+    pub seat_credit_entitlement: Option<f64>,
 
     /// Optional provider API/web region from persisted settings.
     pub api_region: Option<String>,
@@ -631,14 +787,35 @@ impl Default for FetchContext {
             web_timeout: 60,
             verbose: false,
             manual_cookie_header: None,
+            manual_cookie_missing: false,
             api_key: None,
             workspace_id: None,
+            seat_credit_entitlement: None,
             api_region: None,
             gateway_url: None,
             auto_prefer_web: false,
             requires_optional_usage_completeness: false,
         }
     }
+}
+
+/// How the shell should treat a failed refresh when a prior good snapshot exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastGoodFailurePolicy {
+    Replace,
+    Preserve,
+    PreserveOnce,
+    PreserveOnceThenSurface,
+}
+
+/// How the shell should treat a manual cookie source with no cookie present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualEmptyCookiePolicy {
+    /// Remap to the shell's generic browser-cookie attempt.
+    Fallback,
+    /// Keep `SourceMode::Web` with no header so the provider fails closed
+    /// instead of importing a browser account the user did not select.
+    FailClosedWeb,
 }
 
 /// Trait that all providers must implement
@@ -678,6 +855,74 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Whether an explicitly selected manual cookie outranks a token-account override.
+    fn manual_cookie_precedes_token_account(&self) -> bool {
+        false
+    }
+
+    /// How the shell treats a manual cookie source with no cookie present.
+    ///
+    /// `Fallback` lets the shell remap to its generic browser-cookie attempt.
+    /// `FailClosedWeb` keeps `SourceMode::Web` without any header, so the
+    /// provider fails closed instead of importing a browser account the user
+    /// did not select.
+    fn manual_empty_cookie_policy(&self) -> ManualEmptyCookiePolicy {
+        ManualEmptyCookiePolicy::Fallback
+    }
+
+    /// Whether Automatic metric selection should prefer an exhausted quota lane.
+    fn automatic_metric_prioritizes_exhausted_window(&self) -> bool {
+        true
+    }
+
+    /// Whether an explicit (non-Automatic) metric preference whose lane is
+    /// unavailable should still fall through to Automatic selection. Providers
+    /// with Automatic-only fallback lanes (seat credits) override this to
+    /// `false` so an explicit choice is never silently replaced by fallback
+    /// progress.
+    fn explicit_preference_falls_through_to_automatic(&self) -> bool {
+        true
+    }
+
+    /// Whether Automatic metric selection is a dead end when the primary lane
+    /// is informational and no secondary lane exists. Providers with
+    /// Automatic-only fallback lanes (seat credits) override this to `false`
+    /// so the fallback lane can still fill in.
+    fn automatic_metric_missing_core_is_terminal(&self) -> bool {
+        true
+    }
+
+    /// Whether browser-cookie discovery/recovery is owned by the provider.
+    fn owns_browser_cookie_resolution(&self) -> bool {
+        false
+    }
+
+    /// How the shell should treat a failed refresh when a prior good snapshot exists.
+    fn last_good_failure_policy(&self, _error: &str) -> LastGoodFailurePolicy {
+        LastGoodFailurePolicy::Replace
+    }
+
+    /// Whether this provider can safely retain its last good snapshot on a
+    /// classified transport failure.
+    fn retains_last_good_on_transport_failure(&self) -> bool {
+        false
+    }
+
+    /// Typed variant used before an error is sanitized for the frontend.
+    ///
+    /// Providers that need message-based distinctions can keep overriding the
+    /// string method. Transport retention is selected by the provider
+    /// capability and the typed error classification above.
+    fn last_good_failure_policy_for_error(&self, error: &ProviderError) -> LastGoodFailurePolicy {
+        if matches!(error, ProviderError::OAuthTransient(_)) {
+            return LastGoodFailurePolicy::Preserve;
+        }
+        if self.retains_last_good_on_transport_failure() && error.is_transport_failure() {
+            return LastGoodFailurePolicy::Preserve;
+        }
+        self.last_good_failure_policy(&error.to_string())
+    }
+
     /// Presentation-safe availability state for a refresh error. The default
     /// maps `ProviderError` variants, treating `NotInstalled` as a missing
     /// credential (most providers raise it for a missing API key or auth
@@ -708,6 +953,17 @@ pub fn cli_name_map() -> HashMap<&'static str, ProviderId> {
     map.insert("di", ProviderId::DeepInfra);
     map.insert("fireworks-ai", ProviderId::Fireworks);
     map.insert("fw", ProviderId::Fireworks);
+    map.insert("muse-code", ProviderId::Muse);
+    map.insert("muse code", ProviderId::Muse);
+    map.insert("nous-portal", ProviderId::Nous);
+    map.insert("nous portal", ProviderId::Nous);
+    map.insert("hermes", ProviderId::Nous);
+    map.insert("metaspark", ProviderId::Meta);
+    map.insert("meta-spark", ProviderId::Meta);
+    map.insert("muse-spark", ProviderId::Meta);
+    map.insert("musespark", ProviderId::Meta);
+    map.insert("muse spark", ProviderId::Meta);
+    map.insert("meta muse spark", ProviderId::Meta);
     map.insert("ai&", ProviderId::AiAnd);
     map.insert("ai-and", ProviderId::AiAnd);
     map.insert("codeium", ProviderId::Windsurf);
@@ -748,6 +1004,11 @@ pub fn cli_name_map() -> HashMap<&'static str, ProviderId> {
     map.insert("dg", ProviderId::Deepgram);
     map.insert("groqcloud", ProviderId::Groq);
     map.insert("groq-cloud", ProviderId::Groq);
+    map.insert("hugging-face", ProviderId::HuggingFace);
+    map.insert("hf", ProviderId::HuggingFace);
+    map.insert("nan-builders", ProviderId::Helmcode);
+    map.insert("v0-dev", ProviderId::V0);
+    map.insert("type-safe", ProviderId::TypeSafe);
     map.insert("chutes-ai", ProviderId::Chutes);
     map.insert("lite-llm", ProviderId::LiteLLM);
     map.insert("zed-ai", ProviderId::Zed);
@@ -767,6 +1028,7 @@ pub fn brand_color(id: ProviderId) -> &'static str {
     match id {
         ProviderId::Codex => "#49A3B0",
         ProviderId::Claude => "#CC7C5E",
+        ProviderId::Pi => "#7C3AED",
         ProviderId::Cursor => "#00BFA5",
         ProviderId::Factory => "#FF6B35",
         ProviderId::Gemini => "#AB87EA",
@@ -798,6 +1060,7 @@ pub fn brand_color(id: ProviderId) -> &'static str {
         ProviderId::Kilo => "#5D87FF",
         ProviderId::Bedrock => "#FF9900",
         ProviderId::Codebuff => "#44FF00",
+        ProviderId::CodeRabbit => "#FF5C35",
         ProviderId::DeepSeek => "#527DF0",
         ProviderId::DeepInfra => "#2A3275",
         ProviderId::AiAnd => "#E25C2B",
@@ -814,6 +1077,10 @@ pub fn brand_color(id: ProviderId) -> &'static str {
         ProviderId::ElevenLabs => "#111827",
         ProviderId::Deepgram => "#13EF93",
         ProviderId::Groq => "#F55036",
+        ProviderId::HuggingFace => "#FFD21E",
+        ProviderId::Helmcode => "#4F46E5",
+        ProviderId::V0 => "#111827",
+        ProviderId::TypeSafe => "#2563EB",
         ProviderId::LLMProxy => "#4F46E5",
         ProviderId::Chutes => "#FF5C35",
         ProviderId::LiteLLM => "#0EA5E9",
@@ -835,8 +1102,16 @@ pub fn brand_color(id: ProviderId) -> &'static str {
         ProviderId::Notion => "#337EA9",
         ProviderId::Xai => "#8E8E93",
         ProviderId::Fireworks => "#F25B1C",
+        ProviderId::Meta => "#0467DF",
+        ProviderId::Muse => "#0668E1",
+        ProviderId::Replicate => "#000000",
+        ProviderId::Nous => "#D6A55C",
     }
 }
+
+#[cfg(test)]
+#[path = "provider_transport_tests.rs"]
+mod transport_tests;
 
 #[cfg(test)]
 mod tests {
@@ -845,9 +1120,10 @@ mod tests {
     #[test]
     fn test_provider_id_all() {
         let all = ProviderId::all();
-        assert_eq!(all.len(), 70);
+        assert_eq!(all.len(), 80);
         assert!(all.contains(&ProviderId::Claude));
         assert!(all.contains(&ProviderId::Codex));
+        assert!(all.contains(&ProviderId::Pi));
         assert!(all.contains(&ProviderId::Fireworks));
         assert!(all.contains(&ProviderId::Kimi));
         assert!(all.contains(&ProviderId::KimiK2));
@@ -860,6 +1136,7 @@ mod tests {
         assert!(all.contains(&ProviderId::Infini));
         assert!(all.contains(&ProviderId::Bedrock));
         assert!(all.contains(&ProviderId::Codebuff));
+        assert!(all.contains(&ProviderId::CodeRabbit));
         assert!(all.contains(&ProviderId::DeepSeek));
         assert!(all.contains(&ProviderId::DeepInfra));
         assert!(all.contains(&ProviderId::AiAnd));
@@ -876,6 +1153,10 @@ mod tests {
         assert!(all.contains(&ProviderId::ElevenLabs));
         assert!(all.contains(&ProviderId::Deepgram));
         assert!(all.contains(&ProviderId::Groq));
+        assert!(all.contains(&ProviderId::HuggingFace));
+        assert!(all.contains(&ProviderId::Helmcode));
+        assert!(all.contains(&ProviderId::V0));
+        assert!(all.contains(&ProviderId::TypeSafe));
         assert!(all.contains(&ProviderId::LLMProxy));
         assert!(all.contains(&ProviderId::Chutes));
         assert!(all.contains(&ProviderId::LiteLLM));
@@ -896,6 +1177,10 @@ mod tests {
         assert!(all.contains(&ProviderId::QwenCloud));
         assert!(all.contains(&ProviderId::Notion));
         assert!(all.contains(&ProviderId::Xai));
+        assert!(all.contains(&ProviderId::Meta));
+        assert!(all.contains(&ProviderId::Replicate));
+        assert!(all.contains(&ProviderId::Muse));
+        assert!(all.contains(&ProviderId::Nous));
     }
 
     #[test]
@@ -931,6 +1216,8 @@ mod tests {
         assert_eq!(ProviderId::Codex.cli_name(), "codex");
         assert_eq!(ProviderId::Factory.cli_name(), "factory");
         assert_eq!(ProviderId::Zai.cli_name(), "zai");
+        assert_eq!(ProviderId::HuggingFace.cli_name(), "huggingface");
+        assert_eq!(ProviderId::CodeRabbit.cli_name(), "coderabbit");
     }
 
     #[test]
@@ -938,6 +1225,8 @@ mod tests {
         assert_eq!(ProviderId::Claude.display_name(), "Claude");
         assert_eq!(ProviderId::Factory.display_name(), "Factory");
         assert_eq!(ProviderId::Zai.display_name(), "z.ai");
+        assert_eq!(ProviderId::HuggingFace.display_name(), "Hugging Face");
+        assert_eq!(ProviderId::CodeRabbit.display_name(), "CodeRabbit");
     }
 
     #[test]
@@ -955,6 +1244,10 @@ mod tests {
             Some(ProviderId::Claude)
         );
         assert_eq!(ProviderId::from_cli_name("codex"), Some(ProviderId::Codex));
+        assert_eq!(
+            ProviderId::from_cli_name("hf"),
+            Some(ProviderId::HuggingFace)
+        );
         assert_eq!(ProviderId::from_cli_name("openai"), Some(ProviderId::Codex));
         assert_eq!(
             ProviderId::from_cli_name("factory"),
@@ -966,6 +1259,10 @@ mod tests {
         );
         assert_eq!(ProviderId::from_cli_name("zed"), Some(ProviderId::Zed));
         assert_eq!(ProviderId::from_cli_name("unknown"), None);
+        assert_eq!(
+            ProviderId::from_cli_name("code-rabbit"),
+            Some(ProviderId::CodeRabbit)
+        );
     }
 
     #[test]
@@ -1031,12 +1328,15 @@ mod tests {
         assert_eq!(ProviderId::Kiro.cookie_domain(), Some("kiro.dev"));
         assert_eq!(ProviderId::Kimi.cookie_domain(), Some("kimi.moonshot.cn"));
         assert_eq!(ProviderId::OpenCode.cookie_domain(), Some("opencode.ai"));
+        assert_eq!(ProviderId::Venice.cookie_domain(), Some("venice.ai"));
 
         // Token-based providers (no cookies)
         assert_eq!(ProviderId::Copilot.cookie_domain(), None);
         assert_eq!(ProviderId::Zai.cookie_domain(), None);
         assert_eq!(ProviderId::VertexAI.cookie_domain(), None);
         assert_eq!(ProviderId::JetBrains.cookie_domain(), None);
+        assert_eq!(ProviderId::HuggingFace.cookie_domain(), None);
+        assert_eq!(ProviderId::CodeRabbit.cookie_domain(), None);
     }
 
     #[test]
@@ -1110,6 +1410,81 @@ mod tests {
         assert_eq!(
             ProviderId::from_cli_name("notion ai"),
             Some(ProviderId::Notion)
+        );
+    }
+
+    #[test]
+    fn test_provider_id_meta() {
+        assert_eq!(ProviderId::Meta.cli_name(), "meta");
+        assert_eq!(ProviderId::Meta.display_name(), "Meta");
+        assert_eq!(ProviderId::Meta.cookie_domain(), None);
+        assert_eq!(ProviderId::from_cli_name("meta"), Some(ProviderId::Meta));
+        assert_eq!(
+            ProviderId::from_cli_name("metaspark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(
+            ProviderId::from_cli_name("meta-spark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(ProviderId::from_cli_name("meta"), Some(ProviderId::Meta));
+        assert_eq!(
+            ProviderId::from_cli_name("muse-spark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(
+            ProviderId::from_cli_name("musespark"),
+            Some(ProviderId::Meta)
+        );
+        // Display name round-trips (also covered by the generic alias test).
+        assert_eq!(ProviderId::from_cli_name("Meta"), Some(ProviderId::Meta));
+        // Backwards-compat aliases still resolve.
+        assert_eq!(
+            ProviderId::from_cli_name("Meta Muse Spark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(brand_color(ProviderId::Meta), "#0467DF");
+    }
+
+    #[test]
+    fn test_provider_id_muse() {
+        assert_eq!(ProviderId::Muse.cli_name(), "muse");
+        assert_eq!(ProviderId::Muse.display_name(), "Muse Code");
+        assert_eq!(ProviderId::Muse.cookie_domain(), None);
+        assert_eq!(ProviderId::from_cli_name("muse"), Some(ProviderId::Muse));
+        assert_eq!(
+            ProviderId::from_cli_name("muse-code"),
+            Some(ProviderId::Muse)
+        );
+        assert_eq!(brand_color(ProviderId::Muse), "#0668E1");
+    }
+
+    // The "muse *" alias family spans two providers: bare `muse` / `muse code`
+    // are the Muse Code CLI, while `muse spark` belongs to Meta (Meta Muse
+    // Spark). Pin the boundary so a future alias edit cannot silently re-route
+    // either side (review finding: latent UX/triage trap).
+    #[test]
+    fn muse_alias_family_boundary() {
+        assert_eq!(
+            ProviderId::from_cli_name("muse code"),
+            Some(ProviderId::Muse)
+        );
+        assert_eq!(ProviderId::from_cli_name("muse"), Some(ProviderId::Muse));
+        assert_eq!(
+            ProviderId::from_cli_name("muse spark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(
+            ProviderId::from_cli_name("muse-spark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(
+            ProviderId::from_cli_name("musespark"),
+            Some(ProviderId::Meta)
+        );
+        assert_eq!(
+            ProviderId::from_cli_name("meta muse spark"),
+            Some(ProviderId::Meta)
         );
     }
 

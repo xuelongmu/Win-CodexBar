@@ -16,11 +16,16 @@ use chrono::{Local, Utc};
 use crate::core::{CostScanOptions, FetchContext, ProviderId, SourceMode, instantiate_provider};
 use crate::cost_scanner::{self, CostScanner};
 use crate::settings::Settings;
+use crate::spend_contract::build_local_spend_contract_from_summary;
 
-use super::snapshot::{
-    AccountFetchEnvelope, ClaudeAccountsInput, DashboardIdentity, ProviderFetchEnvelope,
-    RawCostPayload, SnapshotInput, SnapshotPayload, build_snapshot,
+use crate::cli::serve::collection::{
+    AccountFetchEnvelope, ClaudeAccountsInput, ProviderFetchEnvelope, RawCostPayload,
+    SnapshotCollection,
 };
+use crate::cli::serve::dashboard::coordinator::{BoxSnapshotArtifactsFuture, SnapshotArtifacts};
+use crate::cli::serve::metrics::MetricsSnapshot;
+
+use super::snapshot::{DashboardIdentity, SnapshotInput, SnapshotPayload, build_snapshot};
 
 pub type BoxSnapshotFuture = Pin<Box<dyn Future<Output = Result<SnapshotPayload, String>> + Send>>;
 
@@ -63,10 +68,15 @@ impl SnapshotProducer {
 
     pub fn collect(&self) -> BoxSnapshotFuture {
         let this = self.clone();
-        Box::pin(async move { this.collect_inner().await })
+        Box::pin(async move { Ok(this.collect_artifacts_inner().await?.dashboard) })
     }
 
-    async fn collect_inner(&self) -> Result<SnapshotPayload, String> {
+    pub(crate) fn collect_artifacts(&self) -> BoxSnapshotArtifactsFuture<MetricsSnapshot> {
+        let this = self.clone();
+        Box::pin(async move { this.collect_artifacts_inner().await })
+    }
+
+    async fn collect_artifacts_inner(&self) -> Result<SnapshotArtifacts<MetricsSnapshot>, String> {
         let settings = Settings::load();
         // Resolve identity: explicit --identity flag wins; otherwise follow
         // the app's hide_personal_info setting (upstream 0.50.1 #2960).
@@ -102,7 +112,7 @@ impl SnapshotProducer {
         let providers: Vec<ProviderFetchEnvelope> =
             indexed.into_iter().map(|(_, envelope)| envelope).collect();
 
-        let costs = collect_costs().await;
+        let costs = collect_costs(provider_ids.contains(&ProviderId::Pi)).await;
         let claude_accounts =
             collect_claude_accounts(provider_ids.contains(&ProviderId::Claude)).await;
 
@@ -111,18 +121,25 @@ impl SnapshotProducer {
             .map(|id| id.cli_name().to_string())
             .collect();
         let enabled: BTreeSet<String> = order.iter().cloned().collect();
-        let input = SnapshotInput {
+        let collection = SnapshotCollection {
             providers,
             costs,
             claude_accounts,
-            identity,
             generated_at: Utc::now(),
             refresh_seconds: self.refresh_seconds,
-            version: Some(self.version.clone()),
             order,
             enabled,
         };
-        Ok(build_snapshot(&input))
+        let metrics = MetricsSnapshot::from_collection(&collection);
+        Ok(SnapshotArtifacts {
+            dashboard: build_snapshot(&SnapshotInput {
+                collection,
+                identity,
+                version: Some(self.version.clone()),
+                usage_bars_show_used: Some(settings.show_as_used),
+            }),
+            sidecar: Some(metrics),
+        })
     }
 }
 
@@ -140,8 +157,10 @@ async fn fetch_provider_envelope(
         web_timeout: 60,
         verbose: false,
         manual_cookie_header: None,
+        manual_cookie_missing: false,
         api_key: None,
         workspace_id: None,
+        seat_credit_entitlement: None,
         api_region: None,
         gateway_url: None,
         auto_prefer_web: false,
@@ -187,19 +206,24 @@ async fn bounded_fetch(
     }
 }
 
-/// Local cost data for the two scanned providers, computed off the async
+/// Local cost data for the scanned providers, computed off the async
 /// runtime so a large corpus cannot stall dashboard builds.
-async fn collect_costs() -> HashMap<String, RawCostPayload> {
-    let result = tokio::task::spawn_blocking(|| {
-        let scanner = CostScanner::new(30).with_options(CostScanOptions::app_driven());
+async fn collect_costs(pi_selected: bool) -> HashMap<String, RawCostPayload> {
+    let result = tokio::task::spawn_blocking(move || {
+        let mut scan_options = CostScanOptions::app_driven();
+        scan_options.include_pi_sessions = !pi_selected;
+        let scanner = CostScanner::new(30).with_options(scan_options);
         let codex = scanner.scan_codex_with_cancel(None);
-        let claude = scanner.scan_claude_with_cancel(None);
+        let claude = scanner.scan_claude_with_cancel_and_pi_sessions(None, !pi_selected);
+        let pi = scanner.scan_pi_with_cancel(None);
+        let pi_contract =
+            build_local_spend_contract_from_summary("pi", 30, false, false, false, pi);
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         let today_of = |provider: &str| {
             cost_scanner::get_daily_cost_history(provider, 30)
                 .into_iter()
                 .find(|(day, _)| day == &today)
-                .map(|(_, cost)| cost)
+                .and_then(|(_, cost)| cost)
         };
         let mut costs = HashMap::new();
         costs.insert(
@@ -214,6 +238,13 @@ async fn collect_costs() -> HashMap<String, RawCostPayload> {
             RawCostPayload {
                 today_usd: today_of("claude"),
                 last_30_days_usd: Some(claude.total_cost_usd),
+            },
+        );
+        costs.insert(
+            "pi".to_string(),
+            RawCostPayload {
+                today_usd: today_of("pi"),
+                last_30_days_usd: pi_contract.known_cost_usd,
             },
         );
         costs
@@ -259,8 +290,10 @@ async fn collect_claude_accounts(claude_enabled: bool) -> Option<ClaudeAccountsI
                 web_timeout: 60,
                 verbose: false,
                 manual_cookie_header: Some(header),
+                manual_cookie_missing: false,
                 api_key: None,
                 workspace_id: None,
+                seat_credit_entitlement: None,
                 api_region: None,
                 gateway_url: None,
                 auto_prefer_web: false,

@@ -359,7 +359,7 @@ impl CostSummaryDisplayStyle {
 /// empty objects (or skip serialization entirely). Defaults are applied via
 /// the accessor methods on [`Settings`] (e.g. cookie source defaults to
 /// `"auto"`, region defaults are provider-specific).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -388,14 +388,34 @@ pub struct ProviderConfig {
     /// Codex-only: show or hide Codex Spark quota rows in presentation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spark_usage_visible: Option<bool>,
+    /// Presentation-only usage rows hidden by the user. `None` preserves the
+    /// legacy visibility flags until the new visibility controls are used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_usage_item_ids: Option<Vec<String>>,
     /// Codex-only: enable historical usage tracking in UI.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub historical_tracking: bool,
     /// Claude-only: avoid keychain prompts when reading credentials.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub avoid_keychain_prompts: bool,
+    /// Claude-only: opt in to reading external accounts from the claude-swap
+    /// (`cswap`) executable. Disabled by default; CodexBar never reads or stores
+    /// claude-swap credentials (issue #477).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_swap_enabled: bool,
+    /// Claude-only: path to the claude-swap (`cswap`) executable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_swap_executable_path: Option<String>,
+    /// Codex/Claude-only: reopen the captured CLI session after its quota resets.
+    /// Disabled by default; the desktop shell never injects a prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_resume_after_quota_reset: bool,
     /// Per-provider accent color override (hex, e.g. "#FF5733"). `None`
     /// means the shipped brand color is used (#2972).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accent_color: Option<String>,
+    /// Optional user-entered Copilot seat AI-credit allowance. GitHub does not
+    /// publish this denominator; it is only used when a valid value is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_credit_entitlement: Option<f64>,
 }

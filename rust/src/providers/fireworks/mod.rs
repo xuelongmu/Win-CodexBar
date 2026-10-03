@@ -172,7 +172,7 @@ impl FireworksSummary {
     fn to_cost_snapshot(&self) -> Option<CostSnapshot> {
         let spend = self.last_30_days_spend?;
         let currency = self.currency_code.as_deref().unwrap_or("USD");
-        Some(CostSnapshot::new(spend, currency, "Last 30 days"))
+        Some(CostSnapshot::new(spend, currency, "Last 30 days").always_visible())
     }
 }
 
@@ -199,6 +199,7 @@ impl FireworksProvider {
                 is_primary: false,
                 dashboard_url: Some("https://app.fireworks.ai"),
                 status_page_url: None,
+                tertiary_label_key: None,
             },
             client: crate::core::credentialed_http_client_builder()
                 .timeout(std::time::Duration::from_secs(15))

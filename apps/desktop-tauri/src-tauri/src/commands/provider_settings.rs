@@ -96,6 +96,42 @@ pub fn set_provider_usage_source(provider_id: String, source: String) -> Result<
     settings.save().map_err(|e| e.to_string())
 }
 
+fn auto_resume_provider(provider_id: &str) -> Result<ProviderId, String> {
+    let id = parse_provider_arg(provider_id)?;
+    if crate::auto_resume::supports_auto_resume(id) {
+        Ok(id)
+    } else {
+        Err(format!(
+            "Provider '{provider_id}' does not support automatic session resume"
+        ))
+    }
+}
+
+/// Persist the explicit Codex/Claude opt-in for reopening an exact CLI session
+/// after its quota becomes available again.
+#[tauri::command]
+pub fn set_provider_auto_resume_after_quota_reset(
+    app: tauri::AppHandle,
+    provider_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let id = auto_resume_provider(&provider_id)?;
+    if enabled && !super::provider_detail::auto_resume_supported(id) {
+        return Err(
+            "Automatic session resume is unavailable while a managed token account is active"
+                .to_string(),
+        );
+    }
+    let mut settings = Settings::load();
+    settings.set_auto_resume_after_quota_reset(id, enabled);
+    settings.save().map_err(|e| e.to_string())?;
+    if !enabled {
+        crate::auto_resume::clear(&app, id);
+    }
+    crate::events::emit_settings_changed(&app);
+    Ok(())
+}
+
 // ── OpenRouter Management API key ────────────────────────────────────
 
 #[tauri::command]
@@ -124,6 +160,44 @@ pub fn remove_openrouter_management_api_key() -> Result<(), String> {
     settings.save().map_err(|error| error.to_string())
 }
 
+// ── Azure OpenAI API version ─────────────────────────────────────────
+
+fn azure_openai_provider(provider_id: &str) -> Result<codexbar::core::ProviderId, String> {
+    let id = parse_provider_arg(provider_id)?;
+    if id != codexbar::core::ProviderId::AzureOpenAI {
+        return Err(format!(
+            "Provider '{provider_id}' does not expose an Azure OpenAI API-version picker"
+        ));
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn get_provider_azure_api_version(provider_id: String) -> Result<Option<String>, String> {
+    let id = azure_openai_provider(&provider_id)?;
+    Ok(ApiKeys::load()
+        .api_version(id.cli_name())
+        .map(ToOwned::to_owned))
+}
+
+#[tauri::command]
+pub fn set_provider_azure_api_version(
+    provider_id: String,
+    api_version: String,
+) -> Result<(), String> {
+    let id = azure_openai_provider(&provider_id)?;
+    let value = api_version.trim();
+    if value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("Azure OpenAI API version is invalid".to_string());
+    }
+    let mut keys = ApiKeys::load();
+    keys.set_api_version(
+        id.cli_name(),
+        (!value.is_empty()).then_some(value.to_string()),
+    );
+    keys.save().map_err(|error| error.to_string())
+}
+
 // ── Per-provider cookie source + region ───────────────────────────────
 
 /// Map a CLI-name string to a `ProviderId` whose cookie source is exposed in
@@ -137,6 +211,7 @@ fn cookie_source_provider(provider_id: &str) -> Option<codexbar::core::ProviderI
         "opencode" => ProviderId::OpenCode,
         "factory" => ProviderId::Factory,
         "alibaba" => ProviderId::Alibaba,
+        "alibabatokenplan" => ProviderId::AlibabaTokenPlan,
         "kimi" | "kimik2" => ProviderId::Kimi,
         "minimax" => ProviderId::MiniMax,
         "augment" => ProviderId::Augment,
@@ -148,6 +223,9 @@ fn cookie_source_provider(provider_id: &str) -> Option<codexbar::core::ProviderI
         "sakana" => ProviderId::Sakana,
         "notion" => ProviderId::Notion,
         "grok" => ProviderId::Grok,
+        "replicate" => ProviderId::Replicate,
+        "helmcode" => ProviderId::Helmcode,
+        "typesafe" => ProviderId::TypeSafe,
         _ => return None,
     })
 }
@@ -249,6 +327,8 @@ fn workspace_provider(provider_id: &str) -> Option<codexbar::core::ProviderId> {
         "opencodego" => ProviderId::OpenCodeGo,
         "zed" => ProviderId::Zed,
         "xai" => ProviderId::Xai,
+        "v0" => ProviderId::V0,
+        "helmcode" => ProviderId::Helmcode,
         _ => return None,
     })
 }
@@ -547,7 +627,7 @@ pub fn cookie_source_options_for(provider_id: &str, lang: Language) -> Vec<Cooki
                 None,
             ),
         ],
-        "alibaba" => vec![
+        "alibaba" | "alibabatokenplan" => vec![
             cookie_option(
                 lang,
                 "auto",
@@ -652,6 +732,54 @@ pub fn cookie_source_options_for(provider_id: &str, lang: Language) -> Vec<Cooki
                 None,
             ),
             cookie_option(lang, "off", "", "", Some("Notion cookies are disabled.")),
+        ],
+        "replicate" => vec![
+            cookie_option(
+                lang,
+                "auto",
+                "Automatic imports the signed-in replicate.com browser session.",
+                "Paste a Cookie header from the Replicate billing page.",
+                None,
+            ),
+            cookie_option(
+                lang,
+                "manual",
+                "",
+                "Paste a Cookie header from https://replicate.com/account/billing.",
+                None,
+            ),
+        ],
+        "helmcode" => vec![
+            cookie_option(
+                lang,
+                "auto",
+                "Automatically imports the signed-in Helmcode or NaN Builders browser session.",
+                "",
+                None,
+            ),
+            cookie_option(
+                lang,
+                "manual",
+                "",
+                "Paste a Cookie header and select the tenant in the workspace field.",
+                None,
+            ),
+        ],
+        "typesafe" => vec![
+            cookie_option(
+                lang,
+                "auto",
+                "Automatically imports the signed-in TypeSafe console session.",
+                "",
+                None,
+            ),
+            cookie_option(
+                lang,
+                "manual",
+                "",
+                "Paste a Cookie header from the TypeSafe billing page.",
+                None,
+            ),
         ],
         _ => Vec::new(),
     }

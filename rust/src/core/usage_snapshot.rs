@@ -3,7 +3,42 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::ProviderDisplayDetail;
 use super::RateWindow;
+/// Subscription dates explicitly reported by an authenticated provider
+/// dashboard or subscription endpoint.
+///
+/// These values are deliberately independent from quota-window reset times:
+/// a reset is not evidence of a subscription boundary, and a missing date is
+/// kept missing rather than inferred.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renews_at: Option<DateTime<Utc>>,
+}
+
+impl SubscriptionMetadata {
+    pub const fn new(
+        starts_at: Option<DateTime<Utc>>,
+        expires_at: Option<DateTime<Utc>>,
+        renews_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            starts_at,
+            expires_at,
+            renews_at,
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.starts_at.is_none() && self.expires_at.is_none() && self.renews_at.is_none()
+    }
+}
 
 /// Provider-specific operational data reported by a Wayfinder gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,10 +83,34 @@ pub struct NamedRateWindow {
     /// In-memory presentation metadata only; external snapshot JSON stays stable.
     #[serde(default = "named_rate_window_usage_known_default", skip_serializing)]
     pub usage_known: bool,
+    /// Whether this lane is a fallback that only fills in when the provider
+    /// reports no real (non-informational) core quota window. In-memory
+    /// selection metadata only; external snapshot JSON stays stable.
+    #[serde(default = "named_rate_window_fallback_lane_default", skip_serializing)]
+    pub fallback_lane: bool,
+}
+
+/// One display-only item of provider-issued discrete inventory.
+///
+/// This is deliberately separate from [`RateWindow`]: inventory does not
+/// represent a percentage quota and must not participate in quota arithmetic,
+/// tray metric selection, pace, notifications, or auto-resume decisions.
+/// Provider-specific redemption identifiers stay private to the provider
+/// parser and never enter this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInventoryItem {
+    pub id: String,
+    pub title: String,
+    pub available_count: u32,
+    pub next_expires_at: Option<DateTime<Utc>>,
 }
 
 fn named_rate_window_usage_known_default() -> bool {
     true
+}
+
+fn named_rate_window_fallback_lane_default() -> bool {
+    false
 }
 
 impl NamedRateWindow {
@@ -61,11 +120,17 @@ impl NamedRateWindow {
             title: title.into(),
             window,
             usage_known: true,
+            fallback_lane: false,
         }
     }
 
     pub fn with_usage_known(mut self, usage_known: bool) -> Self {
         self.usage_known = usage_known;
+        self
+    }
+
+    pub fn with_fallback_lane(mut self, fallback_lane: bool) -> Self {
+        self.fallback_lane = fallback_lane;
         self
     }
 }
@@ -85,9 +150,19 @@ pub struct UsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secondary: Option<RateWindow>,
 
+    /// Provider-resolved label for the secondary rate window when metadata
+    /// describes a model family rather than this snapshot's cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_label: Option<String>,
+
     /// Model-specific rate window (e.g., Opus quota for Claude)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_specific: Option<RateWindow>,
+
+    /// Whether `model_specific` came from Codex's explicit code-review lane.
+    /// Internal-only metadata keeps generic positional fallbacks out of metrics.
+    #[serde(skip)]
+    pub(crate) model_specific_is_code_review: bool,
 
     /// Tertiary rate window (e.g., 30-day quota for Infini)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,6 +186,11 @@ pub struct UsageSnapshot {
     /// Login method/plan info (e.g., "Claude Pro", "Claude Max")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_method: Option<String>,
+
+    /// Subscription dates explicitly reported by the provider's authenticated
+    /// dashboard/API. These are not derived from quota reset windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<SubscriptionMetadata>,
 }
 
 impl UsageSnapshot {
@@ -120,13 +200,16 @@ impl UsageSnapshot {
             primary,
             primary_label: None,
             secondary: None,
+            secondary_label: None,
             model_specific: None,
+            model_specific_is_code_review: false,
             tertiary: None,
             extra_rate_windows: Vec::new(),
             updated_at: Utc::now(),
             account_email: None,
             account_organization: None,
             login_method: None,
+            subscription: None,
         }
     }
 
@@ -142,10 +225,30 @@ impl UsageSnapshot {
         self
     }
 
+    /// Builder pattern: override the secondary window label for this snapshot.
+    pub fn with_secondary_label(mut self, label: impl Into<String>) -> Self {
+        self.secondary_label = Some(label.into());
+        self
+    }
+
     /// Builder pattern: set model-specific window
     pub fn with_model_specific(mut self, model_specific: RateWindow) -> Self {
         self.model_specific = Some(model_specific);
+        self.model_specific_is_code_review = false;
         self
+    }
+
+    /// Mark a Codex window that came from the explicit `code_review_window` field.
+    pub(crate) fn with_code_review(mut self, code_review: RateWindow) -> Self {
+        self.model_specific = Some(code_review);
+        self.model_specific_is_code_review = true;
+        self
+    }
+
+    pub(crate) fn code_review_window(&self) -> Option<&RateWindow> {
+        self.model_specific_is_code_review
+            .then_some(self.model_specific.as_ref())
+            .flatten()
     }
 
     /// Builder pattern: set tertiary window
@@ -181,6 +284,14 @@ impl UsageSnapshot {
     /// Builder pattern: set login method
     pub fn with_login_method(mut self, method: impl Into<String>) -> Self {
         self.login_method = Some(method.into());
+        self
+    }
+
+    /// Attach an explicitly observed subscription payload. Passing `None`
+    /// clears a previously attached payload when the provider has positively
+    /// reported that no subscription dates are available.
+    pub fn with_subscription(mut self, subscription: Option<SubscriptionMetadata>) -> Self {
+        self.subscription = subscription;
         self
     }
 
@@ -231,6 +342,21 @@ impl UsageSnapshot {
     }
 }
 
+#[cfg(test)]
+mod internal_projection_tests {
+    use super::*;
+
+    #[test]
+    fn code_review_source_marker_is_not_serialized() {
+        let snapshot =
+            UsageSnapshot::new(RateWindow::new(10.0)).with_code_review(RateWindow::new(20.0));
+        let json = serde_json::to_value(snapshot).expect("usage snapshot JSON");
+
+        assert!(json.get("model_specific_is_code_review").is_none());
+        assert!(json.get("modelSpecificIsCodeReview").is_none());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CostDailyPoint {
     pub day: String,
@@ -270,9 +396,24 @@ pub struct CostSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance: Option<f64>,
 
+    /// When the prepaid balance was successfully observed. This is independent
+    /// from `updated_at`, which belongs to the usage/limit observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_updated_at: Option<DateTime<Utc>>,
+
+    /// Provider account that owns this cost observation, when the provider
+    /// exposes a stable account identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+
     /// Exact daily spend points when the provider supplies them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub daily: Vec<CostDailyPoint>,
+
+    /// Provider-owned presentation hint for spend that is itself a primary
+    /// usage signal and must remain visible when optional local summaries are hidden.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_visible: bool,
 }
 
 impl CostSnapshot {
@@ -287,7 +428,10 @@ impl CostSnapshot {
             resets_at: None,
             updated_at: Utc::now(),
             balance: None,
+            balance_updated_at: None,
+            account_id: None,
             daily: Vec::new(),
+            always_visible: false,
         }
     }
 
@@ -300,11 +444,100 @@ impl CostSnapshot {
     /// Builder pattern: set remaining prepaid balance (finite, ≥ 0 only)
     pub fn with_balance(mut self, balance: f64) -> Self {
         self.balance = finite_amount(balance);
+        self.balance_updated_at = self.balance.map(|_| self.updated_at);
         self
+    }
+
+    /// Record a balance observation, including a confirmed zero or absence.
+    pub fn with_balance_observation(
+        mut self,
+        balance: Option<f64>,
+        observed_at: DateTime<Utc>,
+    ) -> Self {
+        self.balance = balance.and_then(finite_amount);
+        self.balance_updated_at = Some(observed_at);
+        self
+    }
+
+    /// Builder pattern: scope this observation to a provider account.
+    pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
+        let account_id = account_id.into();
+        self.account_id = (!account_id.trim().is_empty()).then_some(account_id);
+        self
+    }
+
+    /// Replace only the balance observation while preserving the usage/limit
+    /// age and all provider presentation metadata.
+    pub fn replacing_balance(
+        &self,
+        balance: Option<f64>,
+        balance_updated_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        let mut replacement = self.clone();
+        replacement.balance = balance.and_then(finite_amount);
+        replacement.balance_updated_at = balance_updated_at;
+        replacement
+    }
+
+    /// Reconcile two same-account observations whose usage cap and purchased
+    /// balance may have been fetched at different times.
+    pub fn reconcile(live: Option<&Self>, attached: Option<&Self>) -> Option<Self> {
+        let Some(live) = live else {
+            return attached.cloned();
+        };
+        let Some(attached) = attached else {
+            return Some(live.clone());
+        };
+        if !live
+            .currency_code
+            .eq_ignore_ascii_case(&attached.currency_code)
+            || (live.account_id.is_some()
+                && attached.account_id.is_some()
+                && live.account_id != attached.account_id)
+        {
+            return Some(live.clone());
+        }
+
+        let balance_date = |cost: &Self| {
+            cost.balance_updated_at
+                .or_else(|| cost.balance.map(|_| cost.updated_at))
+        };
+        let live_balance_date = balance_date(live);
+        let attached_balance_date = balance_date(attached);
+        let balance_source = match live_balance_date {
+            Some(live_date)
+                if attached_balance_date.is_none_or(|attached_date| live_date >= attached_date) =>
+            {
+                live
+            }
+            _ => attached,
+        };
+        let cap_source = if attached.limit.is_some_and(|limit| limit > 0.0)
+            && (live.limit.unwrap_or(0.0) <= 0.0 || attached.updated_at > live.updated_at)
+        {
+            attached
+        } else {
+            live
+        };
+        let mut result =
+            cap_source.replacing_balance(balance_source.balance, balance_date(balance_source));
+        if result.account_id.is_none() {
+            result.account_id = live
+                .account_id
+                .clone()
+                .or_else(|| attached.account_id.clone());
+        }
+        Some(result)
     }
 
     pub fn with_daily(mut self, daily: Vec<CostDailyPoint>) -> Self {
         self.daily = daily;
+        self
+    }
+
+    /// Keep this provider-metered spend visible even when optional local cost summaries are hidden.
+    pub fn always_visible(mut self) -> Self {
+        self.always_visible = true;
         self
     }
 
@@ -382,8 +615,38 @@ pub struct ProviderFetchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wayfinder_usage: Option<WayfinderUsageSnapshot>,
 
+    /// Transient non-quota inventory for provider-specific display.
+    ///
+    /// The field is intentionally skipped by serde: it belongs to the current
+    /// fetch and must not change persisted `ProviderFetchResult` JSON.
+    #[serde(skip)]
+    pub inventory: Vec<ProviderInventoryItem>,
+
+    /// Transient provider-specific detail rows for display only. They are not
+    /// serialized by the core result; use [`Self::display_details`] for an
+    /// explicit surface projection.
+    #[serde(skip)]
+    pub display_details: Vec<ProviderDisplayDetail>,
+
     /// Label describing the data source (e.g., "oauth", "web", "cli")
     pub source_label: String,
+
+    /// True only for a live Claude CLI fetch with usable quota windows.
+    #[serde(default)]
+    pub has_successful_claude_cli_quota: bool,
+
+    /// Whether quota data is authoritative enough for pace/run-out advice.
+    #[serde(default = "default_pace_authoritative")]
+    pub pace_authoritative: bool,
+
+    /// Stable provider-account identity used by safety-sensitive local session
+    /// actions. It never crosses the frontend bridge.
+    #[serde(skip)]
+    pub account_identity: Option<String>,
+}
+
+fn default_pace_authoritative() -> bool {
+    true
 }
 
 impl ProviderFetchResult {
@@ -393,8 +656,34 @@ impl ProviderFetchResult {
             usage,
             cost: None,
             wayfinder_usage: None,
+            inventory: Vec::new(),
+            display_details: Vec::new(),
             source_label: source_label.into(),
+            has_successful_claude_cli_quota: false,
+            pace_authoritative: true,
+            account_identity: None,
         }
+    }
+
+    /// Attach the provider's stable account identity without exposing it to
+    /// serialized UI payloads.
+    pub fn with_account_identity(mut self, account_identity: impl Into<String>) -> Self {
+        let account_identity = account_identity.into().trim().to_string();
+        if !account_identity.is_empty() {
+            self.account_identity = Some(account_identity);
+        }
+        self
+    }
+
+    /// Return the stable account identity for internal correlation checks.
+    pub fn account_identity(&self) -> Option<&str> {
+        self.account_identity.as_deref()
+    }
+
+    /// Mark this result as unsuitable for derived pace/run-out advice.
+    pub fn with_non_authoritative_pace(mut self) -> Self {
+        self.pace_authoritative = false;
+        self
     }
 
     /// Builder pattern: set cost
@@ -408,11 +697,66 @@ impl ProviderFetchResult {
         self.wayfinder_usage = Some(usage);
         self
     }
+
+    /// Attach one display-only inventory item without exposing redemption IDs.
+    pub fn with_inventory_item(mut self, item: ProviderInventoryItem) -> Self {
+        self.inventory.push(item);
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_result_pace_authority_defaults_true_and_can_be_disabled() {
+        let usage = UsageSnapshot::new(RateWindow::new(25.0));
+        assert!(ProviderFetchResult::new(usage.clone(), "api").pace_authoritative);
+        assert!(
+            !ProviderFetchResult::new(usage, "local estimate")
+                .with_non_authoritative_pace()
+                .pace_authoritative
+        );
+    }
+
+    #[test]
+    fn fetch_result_inventory_is_transient_and_not_serialized() {
+        let usage = UsageSnapshot::new(RateWindow::new(25.0));
+        let expiry = DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap();
+        let result =
+            ProviderFetchResult::new(usage, "api").with_inventory_item(ProviderInventoryItem {
+                id: "reset-credits".to_string(),
+                title: "Limit Reset Credits".to_string(),
+                available_count: 2,
+                next_expires_at: Some(expiry),
+            });
+
+        assert_eq!(result.inventory.len(), 1);
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert!(encoded.get("inventory").is_none());
+        assert!(encoded.get("reset-credits").is_none());
+
+        let decoded: ProviderFetchResult = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.inventory.is_empty());
+    }
+
+    #[test]
+    fn display_details_reject_invalid_shapes_and_duplicate_ids() {
+        let usage = UsageSnapshot::new(RateWindow::new(25.0));
+        let result = ProviderFetchResult::new(usage, "web")
+            .with_display_detail(ProviderDisplayDetail::new("credits", "Credits", "12"))
+            .with_display_detail(ProviderDisplayDetail::new(
+                "credits",
+                "Credits duplicate",
+                "13",
+            ))
+            .with_display_detail(ProviderDisplayDetail::new("", "", ""));
+
+        let details = result.display_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].value(), "12");
+    }
 
     #[test]
     fn cost_snapshot_ignores_non_finite_values() {
@@ -422,5 +766,54 @@ mod tests {
         assert_eq!(cost.limit, None);
         assert_eq!(cost.used_percent(), None);
         assert_eq!(cost.format_used(), "$0.00");
+    }
+
+    #[test]
+    fn cost_reconcile_keeps_newer_cap_and_balance_observations_separate() {
+        let at = |seconds| DateTime::<Utc>::from_timestamp(seconds, 0).unwrap();
+        let mut attached = CostSnapshot::new(40.0, "Credits", "Monthly").with_limit(100.0);
+        attached.updated_at = at(100);
+        attached = attached.with_account_id("account-1");
+
+        let live = CostSnapshot::new(0.0, "Credits", "Extra usage")
+            .with_balance_observation(Some(0.0), at(200))
+            .with_account_id("account-1");
+        let resolved = CostSnapshot::reconcile(Some(&live), Some(&attached)).unwrap();
+
+        assert_eq!(resolved.used, 40.0);
+        assert_eq!(resolved.limit, Some(100.0));
+        assert_eq!(resolved.balance, Some(0.0));
+        assert_eq!(resolved.balance_updated_at, Some(at(200)));
+        assert_eq!(resolved.updated_at, at(100));
+        assert_eq!(resolved.account_id.as_deref(), Some("account-1"));
+    }
+
+    #[test]
+    fn cost_reconcile_does_not_mix_account_scopes() {
+        let mut attached = CostSnapshot::new(40.0, "Credits", "Monthly").with_limit(100.0);
+        attached.account_id = Some("account-a".to_string());
+        let live = CostSnapshot::new(0.0, "Credits", "Extra usage")
+            .with_balance_observation(Some(7.0), Utc::now())
+            .with_account_id("account-b");
+
+        let resolved = CostSnapshot::reconcile(Some(&live), Some(&attached)).unwrap();
+        assert_eq!(resolved.account_id.as_deref(), Some("account-b"));
+        assert_eq!(resolved.used, 0.0);
+        assert_eq!(resolved.limit, None);
+        assert_eq!(resolved.balance, Some(7.0));
+    }
+
+    #[test]
+    fn cost_provenance_survives_persistence_roundtrip() {
+        let observed_at = DateTime::<Utc>::from_timestamp(123, 0).unwrap();
+        let cost = CostSnapshot::new(2.0, "Credits", "Extra usage")
+            .with_balance_observation(Some(0.0), observed_at)
+            .with_account_id("account-1");
+        let encoded = serde_json::to_value(&cost).unwrap();
+        let decoded: CostSnapshot = serde_json::from_value(encoded).unwrap();
+
+        assert_eq!(decoded.balance, Some(0.0));
+        assert_eq!(decoded.balance_updated_at, Some(observed_at));
+        assert_eq!(decoded.account_id.as_deref(), Some("account-1"));
     }
 }

@@ -12,6 +12,7 @@ const tauriMocks = vi.hoisted(() => ({
   getCodexAccountsState: vi.fn(),
   codexAccountAdd: vi.fn(),
   codexAccountFetch: vi.fn(),
+  codexAccountReauthenticate: vi.fn(),
   codexAccountRemove: vi.fn(),
   codexAccountSwitch: vi.fn(),
   codexAccountRestartDesktop: vi.fn(),
@@ -65,7 +66,11 @@ describe("CodexAccountsSection", () => {
 
   it("renders nothing before the store loads, then lists accounts", async () => {
     tauriMocks.getCodexAccountsState.mockResolvedValue(
-      { accounts: [account("1"), account("2", { source: "ambient" })], snapshots: {} } as CodexAccountsStateBridge,
+      {
+        accounts: [account("1"), account("2", { source: "ambient" })],
+        accountOrdinals: { "1": 1, "2": 2 },
+        snapshots: {},
+      } as CodexAccountsStateBridge,
     );
     const { container } = render(<CodexAccountsSection t={t} />);
     expect(container.querySelector(".codex-accounts")).toBeNull();
@@ -76,12 +81,67 @@ describe("CodexAccountsSection", () => {
     expect(screen.getByText("user-2@example.com")).toBeDefined();
     expect(screen.getByText("CodexAccountsSourceManaged")).toBeDefined();
     expect(screen.getByText("CodexAccountsSourceAmbient")).toBeDefined();
+    expect(screen.getAllByText("CodexAccountsReauthenticateButton")).toHaveLength(1);
+  });
+
+  it("redacts the ambient row while preserving the managed row when privacy is on", async () => {
+    const ambient = account("ambient", {
+      source: "ambient",
+      nickname: "Private System Name",
+      emailHint: "system@example.com",
+    });
+    const managed = account("managed", {
+      nickname: "Work",
+      emailHint: "work@example.com",
+    });
+    tauriMocks.getCodexAccountsState.mockResolvedValue({
+      accounts: [ambient, managed],
+      accountOrdinals: { ambient: 1, managed: 2 },
+      displayNames: {
+        ambient: "system@example.com — Private System Name",
+        managed: "work@example.com — Work",
+      },
+      snapshots: {},
+    } as CodexAccountsStateBridge);
+
+    render(<CodexAccountsSection t={t} hidePersonalInfo />);
+    await screen.findByText("Account 1");
+    expect(screen.queryByText(/system@example\.com|Private System Name/)).toBeNull();
+    expect(screen.getByText("work@example.com — Work")).toBeDefined();
+    expect(screen.getByText("CodexAccountsSourceAmbient")).toBeDefined();
+    expect(screen.getByText("CodexAccountsSourceManaged")).toBeDefined();
+  });
+
+  it("preserves both current display names when privacy is off", async () => {
+    const ambient = account("ambient", {
+      source: "ambient",
+      nickname: "Private System Name",
+      emailHint: "system@example.com",
+    });
+    const managed = account("managed", {
+      nickname: "Work",
+      emailHint: "work@example.com",
+    });
+    tauriMocks.getCodexAccountsState.mockResolvedValue({
+      accounts: [ambient, managed],
+      accountOrdinals: { ambient: 1, managed: 2 },
+      displayNames: {
+        ambient: "system@example.com — Private System Name",
+        managed: "work@example.com — Work",
+      },
+      snapshots: {},
+    } as CodexAccountsStateBridge);
+
+    render(<CodexAccountsSection t={t} hidePersonalInfo={false} />);
+    await screen.findByText("system@example.com — Private System Name");
+    expect(screen.getByText("work@example.com — Work")).toBeDefined();
   });
 
   it("shows the usage pill and blocked state from a snapshot", async () => {
     tauriMocks.getCodexAccountsState.mockResolvedValue(
       {
         accounts: [account("1")],
+        accountOrdinals: { "1": 1 },
         snapshots: {
           "1": snapshot(38),
         },
@@ -93,8 +153,32 @@ describe("CodexAccountsSection", () => {
     });
   });
 
+  it("offers ambient reauthentication and reloads the account state", async () => {
+    const ambient = account("ambient", { source: "ambient" });
+    tauriMocks.getCodexAccountsState
+      .mockResolvedValueOnce({ accounts: [ambient], accountOrdinals: { ambient: 1 }, snapshots: {} } as CodexAccountsStateBridge)
+      .mockResolvedValueOnce({ accounts: [ambient], accountOrdinals: { ambient: 1 }, snapshots: { ambient: snapshot(12) } } as CodexAccountsStateBridge);
+    tauriMocks.codexAccountReauthenticate.mockResolvedValue(ambient);
+
+    render(<CodexAccountsSection t={t} />);
+    await screen.findByText("CodexAccountsReauthenticateButton");
+
+    await act(async () => {
+      screen.getByText("CodexAccountsReauthenticateButton").click();
+    });
+
+    expect(tauriMocks.codexAccountReauthenticate).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(screen.getByText("free · 12%")).toBeDefined();
+    });
+  });
+
   it("does not offer a desktop session restart for a no-op switch", async () => {
-    tauriMocks.getCodexAccountsState.mockResolvedValue({ accounts: [account("1")], snapshots: {} });
+    tauriMocks.getCodexAccountsState.mockResolvedValue({
+      accounts: [account("1")],
+      accountOrdinals: { "1": 1 },
+      snapshots: {},
+    });
     tauriMocks.codexAccountSwitch.mockResolvedValue({ switchId: "noop", desktopSessionRestorePath: null } as CodexSwitchResult);
     render(<CodexAccountsSection t={t} />);
     await screen.findByText("CodexAccountsSwitchButton");
@@ -106,10 +190,10 @@ describe("CodexAccountsSection", () => {
 
   it("adds an account and reloads", async () => {
     tauriMocks.getCodexAccountsState.mockResolvedValueOnce(
-      { accounts: [], snapshots: {} } as CodexAccountsStateBridge,
+      { accounts: [], accountOrdinals: {}, snapshots: {} } as CodexAccountsStateBridge,
     );
     tauriMocks.getCodexAccountsState.mockResolvedValueOnce(
-      { accounts: [account("1")], snapshots: {} } as CodexAccountsStateBridge,
+      { accounts: [account("1")], accountOrdinals: { "1": 1 }, snapshots: {} } as CodexAccountsStateBridge,
     );
     render(<CodexAccountsSection t={t} />);
     await waitFor(() => {
@@ -128,7 +212,7 @@ describe("CodexAccountsSection", () => {
 
   it.each([true, false])("offers a desktop restart even for a first switch (saved session: %s)", async (restoreExists) => {
     tauriMocks.getCodexAccountsState.mockResolvedValue(
-      { accounts: [account("1")], snapshots: {} } as CodexAccountsStateBridge,
+      { accounts: [account("1")], accountOrdinals: { "1": 1 }, snapshots: {} } as CodexAccountsStateBridge,
     );
     tauriMocks.codexAccountSwitch.mockResolvedValue(
       { switchId: "latest-switch", desktopSessionRestoreExists: restoreExists, desktopSessionRestorePath: "C:/s", desktopSessionBackupPath: null } as CodexSwitchResult,

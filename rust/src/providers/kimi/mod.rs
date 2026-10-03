@@ -31,13 +31,97 @@ const KIMI_WEB_USAGE_URL: &str =
     "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages";
 const KIMI_SUBSCRIPTION_STATS_URL: &str =
     "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats";
+const KIMI_SUBSCRIPTION_URL: &str =
+    "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription";
 const KIMI_COOKIE_DOMAINS: [&str; 2] = ["www.kimi.com", "kimi.moonshot.cn"];
 
 #[derive(Debug, Deserialize)]
 struct KimiCodeApiUsageResponse {
-    usage: KimiUsageDetail,
+    /// Legacy Code API usage payload. Newer responses expose quota pools
+    /// under `usages`; keep this optional so a pool-only response is usable.
+    #[serde(default)]
+    usage: Option<KimiUsageDetail>,
+    #[serde(default)]
+    usages: Option<KimiCodeUsagePools>,
     #[serde(default)]
     limits: Option<Vec<KimiRateLimit>>,
+    /// Optional membership metadata is deliberately kept as JSON. The API has
+    /// added fields and changed types without changing the usage payload; a
+    /// malformed membership section must not discard valid quota statistics.
+    #[serde(default)]
+    user: Option<serde_json::Value>,
+    #[serde(default)]
+    version: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiCodeUsagePools {
+    #[serde(default, rename = "limit_5h")]
+    session: Option<KimiRatioPool>,
+    #[serde(default, rename = "limit_7d")]
+    weekly: Option<KimiRatioPool>,
+    #[serde(default, rename = "limit_month_total")]
+    monthly: Option<KimiRatioPool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiRatioPool {
+    #[serde(default, rename = "used_ratio", alias = "usedRatio")]
+    used_ratio: Option<serde_json::Value>,
+    #[serde(default, rename = "reset_time", alias = "resetTime")]
+    reset_time: Option<serde_json::Value>,
+}
+
+impl KimiRatioPool {
+    /// Explicit zero is a known quota value; missing or malformed ratios stay
+    /// unknown rather than being rendered as 0% used.
+    fn rate_window(&self, window_minutes: u32) -> Option<RateWindow> {
+        let ratio = value_as_f64(self.used_ratio.as_ref())?;
+        if !ratio.is_finite() || ratio < 0.0 {
+            return None;
+        }
+        Some(RateWindow::with_details(
+            ratio.min(1.0) * 100.0,
+            Some(window_minutes),
+            self.reset_time.as_ref().and_then(parse_kimi_timestamp),
+            None,
+        ))
+    }
+}
+impl KimiCodeApiUsageResponse {
+    fn plan_name(&self) -> Option<String> {
+        let level = self
+            .user
+            .as_ref()
+            .and_then(|user| user.get("membership"))
+            .and_then(|membership| membership.get("level"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|level| !level.is_empty() && *level != "LEVEL_UNSPECIFIED")?;
+
+        // Only the known V1 catalog gets friendly names. Unknown catalogs and
+        // malformed versions remain visible as their raw level value.
+        let known_catalog = match self.version.as_ref() {
+            None => true,
+            Some(serde_json::Value::String(version)) => version == "GOODS_VERSION_V1",
+            Some(_) => false,
+        };
+        if !known_catalog {
+            return Some(level.to_string());
+        }
+
+        Some(
+            match level {
+                "LEVEL_FREE" => "Adagio",
+                "LEVEL_TRIAL" => "Andante",
+                "LEVEL_BASIC" => "Moderato",
+                "LEVEL_INTERMEDIATE" => "Allegretto",
+                "LEVEL_ADVANCED" => "Allegro",
+                other => other,
+            }
+            .to_string(),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +163,36 @@ struct KimiSubscriptionRateLimit {
     ratio: Option<serde_json::Value>,
     enabled: Option<bool>,
     reset_time: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiSubscriptionResponse {
+    #[serde(default)]
+    subscription: Option<serde_json::Value>,
+}
+
+impl KimiSubscriptionResponse {
+    fn plan_name(&self) -> Option<String> {
+        let subscription = self.subscription.as_ref()?;
+        if subscription
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            || subscription
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                != Some("SUBSCRIPTION_STATUS_ACTIVE")
+        {
+            return None;
+        }
+        subscription
+            .get("goods")
+            .and_then(|goods| goods.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +245,7 @@ impl KimiProvider {
                 is_primary: false,
                 dashboard_url: Some("https://kimi.moonshot.cn"),
                 status_page_url: None,
+                tertiary_label_key: None,
             },
         }
     }
@@ -296,8 +411,8 @@ fn kimi_window_minutes(window: &KimiWindow) -> Option<u32> {
     match unit.as_str() {
         "second" | "seconds" => Some((window.duration / 60).max(1)),
         "minute" | "minutes" => Some(window.duration),
-        "hour" | "hours" => Some(window.duration.saturating_mul(60)),
-        "day" | "days" => Some(window.duration.saturating_mul(24 * 60)),
+        "hour" | "hours" => window.duration.checked_mul(60),
+        "day" | "days" => window.duration.checked_mul(24 * 60),
         _ => None,
     }
 }
@@ -468,14 +583,22 @@ fn ascii_header_value(raw: &str) -> String {
 }
 
 fn format_usage_amount(value: f64) -> String {
-    if (value.fract()).abs() < f64::EPSILON {
-        // Value verified integral to f64 precision; the i64 cast loses nothing.
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value < i64::MAX as f64
+    {
+        // The strict upper bound excludes 2^63, which is representable as f64
+        // but has no exact i64 representation.
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "guarded by the fract() == 0 check above"
+            reason = "finite integral value is bounded to the i64 range above"
         )]
         let integral = value as i64;
         format!("{integral}")
+    } else if value.is_finite() && value.fract() == 0.0 {
+        // Preserve a large integral value without saturating it to i64::MAX.
+        format!("{value:.0}")
     } else {
         format!("{value:.2}")
     }
@@ -549,6 +672,34 @@ mod tests {
         let snapshot = code_api::snapshot_from_code_api_response(response).unwrap();
         assert!((snapshot.primary.used_percent - 12.5).abs() < f64::EPSILON);
         assert!(snapshot.secondary.is_none());
+    }
+
+    #[test]
+    fn parses_membership_level_without_making_optional_metadata_required() {
+        let response: KimiCodeApiUsageResponse = serde_json::from_value(json!({
+            "usage": { "limit": "100", "used": "25" },
+            "user": { "membership": { "level": "LEVEL_ADVANCED" } },
+            "version": "GOODS_VERSION_V1"
+        }))
+        .unwrap();
+        assert_eq!(response.plan_name().as_deref(), Some("Allegro"));
+
+        let unknown_catalog: KimiCodeApiUsageResponse = serde_json::from_value(json!({
+            "usage": { "limit": "100", "used": "25" },
+            "user": { "membership": { "level": "LEVEL_CUSTOM" } },
+            "version": "GOODS_VERSION_V2"
+        }))
+        .unwrap();
+        assert_eq!(unknown_catalog.plan_name().as_deref(), Some("LEVEL_CUSTOM"));
+
+        let malformed_optional: KimiCodeApiUsageResponse = serde_json::from_value(json!({
+            "usage": { "limit": "100", "used": "25" },
+            "user": "not-an-object",
+            "version": { "unexpected": true }
+        }))
+        .unwrap();
+        assert_eq!(malformed_optional.plan_name(), None);
+        assert!(code_api::snapshot_from_code_api_response(malformed_optional).is_ok());
     }
 
     #[test]
@@ -705,5 +856,24 @@ mod tests {
         assert_eq!(cleaned_owned("  \"token\"  ").as_deref(), Some("token"));
         assert_eq!(cleaned_owned("'token'").as_deref(), Some("token"));
         assert!(cleaned_owned("   ").is_none());
+    }
+
+    #[test]
+    fn oversized_integral_usage_amount_is_not_saturated_to_i64_max() {
+        let value = 2_f64.powi(63);
+        let formatted = format_usage_amount(value);
+
+        assert!(formatted.starts_with("9223372036854775808"));
+        assert_ne!(formatted, i64::MAX.to_string());
+    }
+
+    #[test]
+    fn overflowing_window_units_are_omitted() {
+        let window = KimiWindow {
+            duration: u32::MAX,
+            time_unit: "hours".to_string(),
+        };
+
+        assert_eq!(kimi_window_minutes(&window), None);
     }
 }

@@ -159,6 +159,7 @@ function settings(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
     resetTimeRelative: true,
     showResetWhenExhausted: false,
     menuBarDisplayMode: "detailed",
+    overviewLayout: "detailed",
     hidePersonalInfo: false,
     updateChannel: "stable",
     autoDownloadUpdates: false,
@@ -169,6 +170,7 @@ function settings(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
     theme: "dark",
     windowScalePercent: 125,
     trayScalePercent: 100,
+    trayPanelAlwaysOnTop: false,
     powertoysStatusPipeEnabled: false,
     claudeAvoidKeychainPrompts: false,
     codexSparkUsageVisible: true,
@@ -673,6 +675,161 @@ describe("FloatBar", () => {
       expect(reset?.textContent).toMatch(/2h [45]m/);
       expect(reset?.textContent).not.toContain("Resets in");
     });
+  });
+
+  it("compacts localized reset text from the timestamp", async () => {
+    const now = Date.parse("2024-06-01T00:00:00Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const fullResetText = "4 小时 59 分钟后重置";
+      tauriMocks.getLocaleStrings.mockResolvedValue(
+        buildBundle(
+          {
+            ResetsInHoursMinutes: "{} 小时 {} 分钟后重置",
+            TrayResetsDueNow: "现在重置",
+          },
+          "chinese",
+        ),
+      );
+      tauriMocks.getCachedProviders.mockResolvedValue([
+        snapshot("claude", "Claude", 20, {
+          resetsAt: "2024-06-01T04:59:00Z",
+        }),
+      ]);
+      tauriMocks.getSettingsSnapshot.mockResolvedValue(
+        settings({ floatBarShowResetInline: true }),
+      );
+
+      const { container } = renderFloatBar(
+        bootstrap({ floatBarShowResetInline: true }),
+      );
+
+      await waitFor(() => {
+        const reset = container.querySelector(".floatbar__reset");
+        expect(reset?.querySelector(".floatbar__reset-time")).toHaveTextContent(
+          "4h 59m",
+        );
+        expect(container.querySelector(".floatbar__pill")?.getAttribute("title")).toContain(
+          fullResetText,
+        );
+        expect(reset?.getAttribute("title")).toBe(fullResetText);
+        expect(reset?.getAttribute("aria-label")).toBe(fullResetText);
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("compacts localized due-now reset text to now", async () => {
+    const now = Date.parse("2024-06-01T00:00:00Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const fullResetText = "重置时间已到";
+      tauriMocks.getLocaleStrings.mockResolvedValue(
+        buildBundle(
+          {
+            TrayResetsDueNow: fullResetText,
+          },
+          "chinese",
+        ),
+      );
+      tauriMocks.getCachedProviders.mockResolvedValue([
+        snapshot("claude", "Claude", 20, {
+          resetsAt: "2024-05-31T23:59:00Z",
+        }),
+      ]);
+      tauriMocks.getSettingsSnapshot.mockResolvedValue(
+        settings({ floatBarShowResetInline: true }),
+      );
+
+      const { container } = renderFloatBar(
+        bootstrap({ floatBarShowResetInline: true }),
+      );
+
+      await waitFor(() => {
+        const reset = container.querySelector(".floatbar__reset");
+        expect(reset?.querySelector(".floatbar__reset-time")).toHaveTextContent(
+          "now",
+        );
+        expect(container.querySelector(".floatbar__pill")?.getAttribute("title")).toContain(
+          fullResetText,
+        );
+        expect(reset?.getAttribute("title")).toBe(fullResetText);
+        expect(reset?.getAttribute("aria-label")).toBe(fullResetText);
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("keeps a future sub-minute reset out of the now state", async () => {
+    const now = Date.parse("2024-06-01T00:00:00Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      tauriMocks.getLocaleStrings.mockResolvedValue(buildBundle({}, "chinese"));
+      tauriMocks.getCachedProviders.mockResolvedValue([
+        snapshot("claude", "Claude", 20, {
+          resetsAt: "2024-06-01T00:00:30Z",
+        }),
+      ]);
+      tauriMocks.getSettingsSnapshot.mockResolvedValue(
+        settings({ floatBarShowResetInline: true }),
+      );
+
+      const { container } = renderFloatBar(
+        bootstrap({ floatBarShowResetInline: true }),
+      );
+
+      await waitFor(() => {
+        expect(container.querySelector(".floatbar__reset-time")).toHaveTextContent(
+          "1m",
+        );
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("compacts localized day and hour reset text", async () => {
+    const now = Date.parse("2024-06-01T00:00:00Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const fullResetText = "1 天 2 小时后重置";
+      tauriMocks.getLocaleStrings.mockResolvedValue(
+        buildBundle(
+          {
+            ResetsInDaysHours: "{} 天 {} 小时后重置",
+          },
+          "chinese",
+        ),
+      );
+      tauriMocks.getCachedProviders.mockResolvedValue([
+        snapshot("claude", "Claude", 20, {
+          resetsAt: "2024-06-02T02:07:00Z",
+        }),
+      ]);
+      tauriMocks.getSettingsSnapshot.mockResolvedValue(
+        settings({ floatBarShowResetInline: true }),
+      );
+
+      const { container } = renderFloatBar(
+        bootstrap({ floatBarShowResetInline: true }),
+      );
+
+      await waitFor(() => {
+        const reset = container.querySelector(".floatbar__reset");
+        expect(reset?.querySelector(".floatbar__reset-time")).toHaveTextContent(
+          "1d 2h",
+        );
+        expect(container.querySelector(".floatbar__pill")?.getAttribute("title")).toContain(
+          fullResetText,
+        );
+        expect(reset?.getAttribute("title")).toBe(fullResetText);
+        expect(reset?.getAttribute("aria-label")).toBe(fullResetText);
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("polls refreshProvidersIfStale on the configured interval", async () => {
