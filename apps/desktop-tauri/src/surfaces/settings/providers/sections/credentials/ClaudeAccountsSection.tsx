@@ -13,6 +13,7 @@ import {
   claudeAccountSwitch,
 } from "../../../../../lib/tauri";
 import { ClaudeSwapAccountsSection } from "./ClaudeSwapAccountsSection";
+import ClaudeAccountUsage from "../../../../../components/ClaudeAccountUsage";
 import {
   localClaudeReconciliationOutcome,
   useClaudeReconciliation,
@@ -109,6 +110,7 @@ export function ClaudeAccountsSection({
                       account.plan,
                     ].filter(Boolean).join(" · ")}
                   </span>
+                  <ClaudeAccountUsage account={account} t={t} />
                   {account.isActive && (
                     <span className="credential-card__badge credential-card__badge--set">
                       {t("TokenAccountActive")}

@@ -302,7 +302,7 @@ export default function MenuCard({
         />
       )}
       {provider.providerId === "claude" && (
-        <ClaudeAccountsMenu hideEmail={hideEmail} onLayoutChange={onLayoutChange} />
+        <ClaudeAccountsMenu hideEmail={hideEmail} onLayoutChange={onLayoutChange} showAsUsed={showAsUsed} resetTimeRelative={resetTimeRelative} />
       )}
       {provider.providerId === "grok" && (
         <GrokAccountsMenu

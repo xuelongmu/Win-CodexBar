@@ -28,6 +28,18 @@ const reconciliation = (generation: number, status: "pending" | "succeeded" | "f
 });
 
 describe("ClaudeAccountsMenu", () => {
+  it("renders per-account usage and reloads it after background checks", async () => {
+    const usage = (used: number) => ({ fiveHour: { usedPercent: used, resetsAt: null }, sevenDay: null, updatedAt: "2026-10-03T12:00:00Z" });
+    mocks.claudeAccountsList.mockResolvedValue([{ ...first, usage: usage(11) }, { ...second, usage: usage(63) }]);
+    render(<ClaudeAccountsMenu hideEmail={false} />);
+    await screen.findByText("89% PanelLeftSuffix");
+    expect(screen.getByText("37% PanelLeftSuffix")).toBeInTheDocument();
+    mocks.claudeAccountsList.mockResolvedValue([{ ...first, usage: usage(20) }, { ...second, usage: usage(70) }]);
+    await act(async () => mocks.listeners.get("claude-accounts-updated")?.({ payload: null }));
+    await screen.findByText("80% PanelLeftSuffix");
+    expect(screen.getByText("30% PanelLeftSuffix")).toBeInTheDocument();
+    expect(mocks.claudeAccountSwitch).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listeners.clear();

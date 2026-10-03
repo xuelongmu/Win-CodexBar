@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { ClaudeAccount } from "../types/bridge";
 import { claudeAccountsList, claudeAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
+import ClaudeAccountUsage from "./ClaudeAccountUsage";
 import {
   localClaudeReconciliationOutcome,
   useClaudeReconciliation,
@@ -12,9 +13,11 @@ import {
   buildPrivateClaudeAccountLabel,
 } from "./claudeAccountDisplay";
 
-export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange }: {
+export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUsed = false, resetTimeRelative = true }: {
   hideEmail: boolean;
   onLayoutChange?: () => void;
+  showAsUsed?: boolean;
+  resetTimeRelative?: boolean;
 }) {
   const { t } = useLocale();
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
@@ -65,7 +68,7 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange }: {
         : "idle";
   useEffect(() => {
     onLayoutChange?.();
-  }, [accounts.length, error, phase, switched, onLayoutChange]);
+  }, [accounts, error, phase, switched, onLayoutChange]);
 
   const accountOrdinals = buildClaudeAccountOrdinals(accounts);
 
@@ -122,6 +125,7 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange }: {
                   {!hideEmail && account.organization && !account.organization.includes(account.email) && (
                     <span className="codex-menu-accounts__usage">{account.organization}</span>
                   )}
+                  <ClaudeAccountUsage account={account} t={t} showAsUsed={showAsUsed} resetTimeRelative={resetTimeRelative} />
                 </div>
                 <button
                   type="button"

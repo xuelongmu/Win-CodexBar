@@ -47,7 +47,7 @@ import type {
   DeepSeekPricingStatus,
 } from "../types/bridge";
 
-export const claudeAccountsList = () => invoke<ClaudeAccount[]>("claude_accounts_list");
+export const claudeAccountsList = () => invoke<ClaudeAccount[]>("get_claude_accounts_state");
 export const claudeReconciliationState = () =>
   invoke<ClaudeReconciliationSnapshot | null>("claude_reconciliation_state");
 export const claudeAccountAdd = () => invoke<void>("claude_account_add");

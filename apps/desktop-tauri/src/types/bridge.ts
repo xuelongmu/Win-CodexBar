@@ -1080,6 +1080,12 @@ export interface ClaudeAccount {
   plan: string | null;
   isActive: boolean;
   isSaved: boolean;
+  usage?: {
+    fiveHour: { usedPercent: number; resetsAt: string | null } | null;
+    sevenDay: { usedPercent: number; resetsAt: string | null } | null;
+    updatedAt: string;
+  } | null;
+  usageError?: string | null;
 }
 
 export interface ClaudeReconciliationSnapshot {
