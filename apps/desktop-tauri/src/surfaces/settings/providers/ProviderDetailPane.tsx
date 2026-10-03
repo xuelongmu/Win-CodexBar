@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer } from "react";
 import type { SettingsSnapshot, SettingsUpdate } from "../../../types/bridge";
 import { useLocale } from "../../../hooks/useLocale";
+import { providerAllowsPace } from "../../../lib/providerPace";
 import {
   getCredentialStorageStatus,
   getProviderCookieSourceOptions,
@@ -23,16 +24,20 @@ import {
 import { buildSubtitle } from "./providerDetailFormat";
 import { IdentitySection } from "./sections/IdentitySection";
 import { UsageSection } from "./sections/UsageSection";
+import { UsageItemVisibilitySection } from "./sections/UsageItemVisibilitySection";
+import { AutoResumeSection } from "./sections/AutoResumeSection";
 import { PaceSection } from "./sections/PaceSection";
 import { CostSection } from "./sections/CostSection";
 import { QuickActionsSection } from "./sections/QuickActionsSection";
 import { ChartsSection } from "./sections/charts/ChartsSection";
 import { CookieSourceSection } from "./sections/CookieSourceSection";
-import { GrokUsageSourceSection } from "./sections/GrokUsageSourceSection";
+import { UsageSourceSection } from "./sections/UsageSourceSection";
+import { shouldShowCookieSource } from "./sections/usageSourcePolicy";
 import { RegionSection } from "./sections/RegionSection";
-import { CodexUsageOptions } from "./sections/credentials/CodexUsageOptions";
+import { CopilotSeatCreditOptions } from "./sections/credentials/CopilotSeatCreditOptions";
 import { CodexAccountsSection } from "./sections/credentials/CodexAccountsSection";
 import { ClaudeAccountsSection } from "./sections/credentials/ClaudeAccountsSection";
+import { GrokAccountsSection } from "./sections/credentials/GrokAccountsSection";
 import { TokenAccountsPanel } from "../tokens/TokenAccountsPanel";
 import { ApiKeySection } from "./ApiKeySection";
 import { CookieSection } from "./CookieSection";
@@ -42,15 +47,18 @@ import { ProviderIssueNotice } from "./sections/ProviderIssueNotice";
 import { CredentialStorageSection } from "./sections/CredentialStorageSection";
 import { CredentialsDispatcher } from "./sections/CredentialsDispatcher";
 import { WayfinderGatewaySection } from "./sections/WayfinderGatewaySection";
+import { AzureApiVersionSection } from "./sections/AzureApiVersionSection";
 
 interface Props {
   providerId: string | null;
   cookieDomain?: string | null;
   resetTimeRelative: boolean;
   providerMetrics: SettingsSnapshot["providerMetrics"];
+  copilotSeatCreditEntitlement: SettingsSnapshot["copilotSeatCreditEntitlement"];
   /** Per-provider accent color overrides (CLI name → hex color). */
   providerAccentColors: SettingsSnapshot["providerAccentColors"];
   wayfinderGatewayUrl: string;
+  hidePersonalInfo: boolean;
   settingsDisabled: boolean;
   onSettingsChange: (patch: SettingsUpdate) => void;
 }
@@ -67,12 +75,14 @@ export function ProviderDetailPane({
   cookieDomain = null,
   resetTimeRelative,
   providerMetrics,
+  copilotSeatCreditEntitlement,
   providerAccentColors,
   wayfinderGatewayUrl,
+  hidePersonalInfo,
   settingsDisabled,
   onSettingsChange,
 }: Props) {
-  const { t } = useLocale();
+  const { t, language } = useLocale();
   const [state, dispatch] = useReducer(
     providerDetailPaneReducer,
     { wayfinderGatewayUrl, providerId },
@@ -195,6 +205,21 @@ export function ProviderDetailPane({
     };
   }, [providerId, load]);
 
+  // Visibility changes are persisted through the shared settings command and
+  // broadcast to detached windows. Reload the selected provider so the raw
+  // descriptor list and hidden IDs stay authoritative after that event.
+  useEffect(() => {
+    if (!providerId) return;
+    const signal = { stale: false };
+    const unlistenPromise = listen("settings-changed", () => {
+      void load(providerId, signal);
+    });
+    return () => {
+      signal.stale = true;
+      void unlistenPromise.then((fn) => fn());
+    };
+  }, [providerId, load]);
+
   if (!providerId) {
     return emptyDetail(t("StateNoProviderSelected"));
   }
@@ -265,8 +290,11 @@ export function ProviderDetailPane({
     <div className="provider-detail">
       <IdentitySection provider={detail} subtitle={subtitle} t={t} />
 
-      {detail.id === "codex" && <CodexAccountsSection t={t} />}
-      {detail.id === "claude" && <ClaudeAccountsSection t={t} />}
+      {detail.id === "codex" && (
+        <CodexAccountsSection t={t} hidePersonalInfo={hidePersonalInfo} />
+      )}
+      {detail.id === "claude" && <ClaudeAccountsSection t={t} language={language} />}
+      {detail.id === "grok" && <GrokAccountsSection t={t} />}
 
       {detail.lastError && (
         <ProviderIssueNotice detail={detail} t={t} />
@@ -276,6 +304,20 @@ export function ProviderDetailPane({
         provider={detail}
         resetTimeRelative={resetTimeRelative}
         t={t}
+      />
+      <UsageItemVisibilitySection
+        provider={detail}
+        disabled={settingsDisabled}
+        t={t}
+        onChange={onSettingsChange}
+      />
+      <AutoResumeSection
+        providerId={detail.id}
+        enabled={detail.autoResumeAfterQuotaReset}
+        available={detail.autoResumeSupported}
+        disabled={settingsDisabled}
+        t={t}
+        onChanged={reload}
       />
       {detail.id === "wayfinder" && (
         <WayfinderGatewaySection
@@ -303,22 +345,31 @@ export function ProviderDetailPane({
         t={t}
         onChange={onSettingsChange}
       />
-      <PaceSection pace={detail.pace} t={t} />
+      <PaceSection
+        pace={
+          providerAllowsPace(detail.id, detail.sourceLabel)
+            ? detail.pace
+            : null
+        }
+        t={t}
+      />
       <CostSection cost={detail.cost} t={t} />
 
-      <GrokUsageSourceSection
+      <UsageSourceSection
         providerId={detail.id}
         currentValue={detail.usageSource}
         t={t}
         onChanged={reload}
       />
-      <CookieSourceSection
-        providerId={detail.id}
-        currentValue={detail.cookieSource}
-        options={cookieOptions}
-        t={t}
-        onChanged={reload}
-      />
+      {shouldShowCookieSource(detail.id, detail.usageSource) && (
+        <CookieSourceSection
+          providerId={detail.id}
+          currentValue={detail.cookieSource}
+          options={cookieOptions}
+          t={t}
+          onChanged={reload}
+        />
+      )}
       <RegionSection
         providerId={detail.id}
         currentValue={detail.region}
@@ -326,8 +377,15 @@ export function ProviderDetailPane({
         t={t}
         onChanged={reload}
       />
+      {detail.id === "azureopenai" && (
+        <AzureApiVersionSection
+          providerId={detail.id}
+          disabled={settingsDisabled}
+          onChanged={reload}
+        />
+      )}
       <CredentialsDispatcher providerId={detail.id} t={t} />
-      {detail.id === "codex" && <CodexUsageOptions t={t} />}
+
       <CredentialStorageSection
         status={credentialStatus}
         busy={busy}

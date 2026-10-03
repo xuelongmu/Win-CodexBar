@@ -39,6 +39,7 @@ impl VertexAIProvider {
                 is_primary: false,
                 dashboard_url: Some("https://console.cloud.google.com/vertex-ai"),
                 status_page_url: Some("https://status.cloud.google.com"),
+                tertiary_label_key: None,
             },
         }
     }
@@ -167,15 +168,11 @@ impl VertexAIProvider {
             return Err(ProviderError::AuthRequired);
         }
 
-        let json: serde_json::Value = resp
-            .json()
+        let body = resp
+            .bytes()
             .await
             .map_err(|e| ProviderError::Parse(e.to_string()))?;
-
-        json.get("access_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| ProviderError::Parse("No access_token in response".to_string()))
+        parse_access_token_response(&body)
     }
 
     /// Fetch usage via Vertex AI API
@@ -201,22 +198,27 @@ impl VertexAIProvider {
             ))
             .header("Authorization", format!("Bearer {}", token))
             .send()
-            .await;
+            .await?;
 
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let json: serde_json::Value = r
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Parse(e.to_string()))?;
-                self.parse_usage_response(&json, &project_id)
-            }
-            _ => {
-                // Return placeholder with project info
-                let usage = UsageSnapshot::new(RateWindow::new(0.0))
-                    .with_login_method(format!("Vertex AI ({})", project_id));
-                Ok(usage)
-            }
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ProviderError::AuthRequired);
+        }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(ProviderError::Other(
+                "Vertex AI request was forbidden.".to_string(),
+            ));
+        }
+        if resp.status().is_success() {
+            let json: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| ProviderError::Parse(e.to_string()))?;
+            self.parse_usage_response(&json, &project_id)
+        } else {
+            // Preserve the existing non-transport fallback for HTTP responses;
+            // only request transport failures reach last-good retention.
+            Ok(UsageSnapshot::new(RateWindow::new(0.0))
+                .with_login_method(format!("Vertex AI ({})", project_id)))
         }
     }
 
@@ -293,6 +295,20 @@ impl VertexAIProvider {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TokenRefreshResponse {
+    access_token: Option<String>,
+}
+
+fn parse_access_token_response(body: &[u8]) -> Result<String, ProviderError> {
+    let response: TokenRefreshResponse =
+        serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    response
+        .access_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| ProviderError::Parse("No access_token in response".to_string()))
+}
+
 impl Default for VertexAIProvider {
     fn default() -> Self {
         Self::new()
@@ -309,13 +325,19 @@ impl Provider for VertexAIProvider {
         &self.metadata
     }
 
+    fn retains_last_good_on_transport_failure(&self) -> bool {
+        true
+    }
+
     async fn fetch_usage(&self, ctx: &FetchContext) -> Result<ProviderFetchResult, ProviderError> {
         tracing::debug!("Fetching Vertex AI usage");
 
         match ctx.source_mode {
             SourceMode::Auto => {
-                if let Ok(usage) = self.fetch_via_web().await {
-                    return Ok(ProviderFetchResult::new(usage, "web"));
+                match self.fetch_via_web().await {
+                    Ok(usage) => return Ok(ProviderFetchResult::new(usage, "web")),
+                    Err(error) if error.is_transport_failure() => return Err(error),
+                    Err(_) => {}
                 }
                 let usage = self.probe_cli().await?;
                 Ok(ProviderFetchResult::new(usage, "cli"))
@@ -342,5 +364,64 @@ impl Provider for VertexAIProvider {
 
     fn supports_cli(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::LastGoodFailurePolicy;
+
+    #[test]
+    fn access_token_response_accepts_usable_token() {
+        let token = parse_access_token_response(br#"{"access_token":"new-token"}"#)
+            .expect("valid token response");
+        assert_eq!(token, "new-token");
+    }
+
+    #[test]
+    fn access_token_response_rejects_missing_token() {
+        let result = parse_access_token_response(br#"{"expires_in":600}"#);
+        assert!(matches!(
+            result,
+            Err(ProviderError::Parse(message)) if message == "No access_token in response"
+        ));
+    }
+
+    #[test]
+    fn access_token_response_rejects_empty_or_whitespace_token() {
+        for body in [
+            br#"{"access_token":""}"#.as_slice(),
+            br#"{"access_token":" \t\n "}"#.as_slice(),
+        ] {
+            let result = parse_access_token_response(body);
+            assert!(matches!(
+                result,
+                Err(ProviderError::Parse(message)) if message == "No access_token in response"
+            ));
+        }
+    }
+
+    #[test]
+    fn access_token_response_rejects_malformed_json() {
+        assert!(matches!(
+            parse_access_token_response(b"not-json"),
+            Err(ProviderError::Parse(message)) if !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn transport_policy_replaces_free_form_wrappers() {
+        let provider = VertexAIProvider::new();
+        assert_eq!(
+            provider.last_good_failure_policy_for_error(&ProviderError::Timeout),
+            LastGoodFailurePolicy::Preserve
+        );
+        assert_eq!(
+            provider.last_good_failure_policy_for_error(&ProviderError::Other(
+                "Network error: arbitrary wrapper".to_string(),
+            )),
+            LastGoodFailurePolicy::Replace
+        );
     }
 }

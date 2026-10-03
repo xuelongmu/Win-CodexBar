@@ -13,7 +13,7 @@
 - Cargo workspace (root `Cargo.toml`): members `rust`, `apps/desktop-tauri/src-tauri`; **default-member** is the Tauri crate.
 - Path dependency: `codexbar-desktop-tauri` → `codexbar = { path = "../../../rust" }`.
 - Frontend: React 18 + Vite in `apps/desktop-tauri/src/`. Typed invoke bridge in `src/lib/tauri.ts`; DTOs in `src/types/bridge.ts`.
-- Surfaces: the hidden `main` webview routes by window label / surface mode — TrayPanel, PopOut, Settings, FloatBar. Settings, float bar, and flyout use detached windows where needed.
+- Surfaces: the hidden `main` webview routes by window label / surface mode — TrayPanel, Settings, FloatBar. Settings, float bar, and the tray-panel flyout use detached windows. The flyout's TrayPanel is the only dashboard layout; the legacy PopOut layout is retired (`SurfaceMode::PopOut` remains only as a data key).
 - **Provider refresh**: `codexbar::core::instantiate_provider` (`rust/src/core/provider_factory.rs`) → `Provider::fetch_usage` → shell `commands/providers.rs` (semaphore + timeout) → `AppState.provider_cache` → events → React `useProviders`.
 - **Settings**: `%config%/CodexBar/settings.json` via `Settings::load` / `save` and `secure_file` (DPAPI-capable on Windows). Frontend `updateSettings` patch → save → `codexbar:settings-updated` / float-bar config events.
 - **Tray**: `tray_bridge` + `tray_menu`. Icon pixels from shared `codexbar::tray::{render_bar_icon_rgba, render_percent_icon_rgba}`.
@@ -108,11 +108,20 @@ pnpm run tauri:build
 
 ## Runtime/Tooling Preferences
 
-- Package manager: **pnpm@11.24.0** (`packageManager` in `apps/desktop-tauri/package.json` + lockfile). Do not introduce npm or yarn lockfiles.
+- Package manager: **pnpm**, with the exact version pinned only by `packageManager` in `apps/desktop-tauri/package.json` (and reflected by the lockfile). Do not introduce npm or yarn lockfiles.
 - Node: CircleCI pins **Node 24.18.0**; no `.nvmrc` in repo. Prefer Node 24.18.0 locally for hosted parity.
 - Rust: edition **2024**, stable toolchain; CI target `x86_64-pc-windows-msvc`. No committed `rust-toolchain.toml` / `rustfmt.toml` / `clippy.toml` — defaults plus CI flags (`clippy -- -D warnings`).
 - Tray / DPAPI / browser-cookie behavior: validate on **Windows-native** hosts. WSL/Linux is insufficient for those paths.
 - **CUA (computer-use) for UI proof** — see [Testing & QA](#testing--qa). Project: [trycua/cua](https://github.com/trycua/cua). On this machine the Windows driver is typically `%LOCALAPPDATA%\Programs\Cua\cua-driver\bin\cua-driver.exe`.
+
+### Worktree storage policy
+
+- Keep source isolation in Git worktrees when branches are edited concurrently. Read-only issue review can use an existing checkout, `git show`, or `git diff` without creating another worktree.
+- Local Cargo builds should load `scripts/worktree-env.ps1`. It sets a process-local `CARGO_TARGET_DIR` outside every registered worktree. Use `WCB_CARGO_TARGET_ROOT` for a temporary machine-local cache root or `WCB_CARGO_TARGET_DIR` for an explicit per-process override.
+- Do not commit a shared writable `target-dir` in `.cargo/config.toml`, set a global `CARGO_TARGET_DIR`, or share one exact target directory between concurrent builds. The source worktree remains isolated; only reproducible build output is redirected.
+- `scripts/worktree-storage.ps1` is read-only. It reports free disk, registered worktrees, worktree-local `target`, `node_modules`, and the configured external Cargo target. Storage warnings are advisory and never delete files, clean Cargo output, switch branches, or prune Git metadata.
+- Treat `target`, Cargo incremental artifacts, frontend build output, and reinstallable `node_modules` as disposable. Preserve source edits, commits, branches, PR history, and review evidence. Before retiring a worktree, verify it is clean and its commit is preserved; removing a worktree does not delete its branch.
+- Use these local warning guides: below 60 GiB free, above 1 GiB per worktree target, or above 5 GiB aggregate worktree targets. Treat below 35 GiB free or above 5 GiB for one target / 10 GiB aggregate as an immediate cleanup review. CircleCI keeps its normal runner-local cache and skips this workstation audit.
 
 
 ## Testing & QA

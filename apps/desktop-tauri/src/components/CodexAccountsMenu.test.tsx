@@ -85,6 +85,7 @@ describe("CodexAccountsMenu", () => {
   it("renders nothing for a single-account setup (single-account fallback)", async () => {
     const { container } = renderMenu(false, {
       accounts: [account("1", { source: "ambient" })],
+      accountOrdinals: { "1": 1 },
       snapshots: {},
     });
     await waitFor(() => {
@@ -100,6 +101,7 @@ describe("CodexAccountsMenu", () => {
         account("1", { source: "ambient" }),
         account("2"),
       ],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: { "1": snapshot(30), "2": snapshot(70) },
     });
     await screen.findByText("user-1@example.com");
@@ -140,6 +142,7 @@ describe("CodexAccountsMenu", () => {
     };
     const { container } = renderMenu(false, {
       accounts: [account("1", { source: "ambient" }), account("2")],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: { "1": weeklyOnly },
     });
     await screen.findByText("user-1@example.com");
@@ -164,6 +167,7 @@ describe("CodexAccountsMenu", () => {
       false,
       {
         accounts: [account("1", { source: "ambient" }), account("2")],
+        accountOrdinals: { "1": 1, "2": 2 },
         snapshots: { "1": snapshot(30, resetAt), "2": snapshot(70, resetAt) },
       },
       false,
@@ -178,6 +182,7 @@ describe("CodexAccountsMenu", () => {
   it("switches an account and kicks a provider refresh", async () => {
     renderMenu(false, {
       accounts: [account("1", { source: "ambient" }), account("2")],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: {},
     });
     await screen.findByText("user-1@example.com");
@@ -185,6 +190,7 @@ describe("CodexAccountsMenu", () => {
     tauriMocks.codexAccountSwitch.mockResolvedValue({});
     tauriMocks.getCodexAccountsState.mockResolvedValue({
       accounts: [account("1", { source: "ambient" }), account("2")],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: {},
     });
     const switchButtons = screen.getAllByText("CodexAccountsSwitchButton");
@@ -196,9 +202,10 @@ describe("CodexAccountsMenu", () => {
     expect(tauriMocks.codexAccountSwitch).toHaveBeenCalledWith("2");
     expect(tauriMocks.refreshProviders).toHaveBeenCalledTimes(1);
   });
-  it("keeps the email tooltip masked while hideEmail is on and raw when off", async () => {
+  it("uses an opaque ordinal only for the ambient account while hideEmail is on", async () => {
     const { container: hidden } = renderMenu(true, {
       accounts: [account("1", { source: "ambient" }), account("2")],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: {},
     });
     await waitFor(() => {
@@ -206,13 +213,27 @@ describe("CodexAccountsMenu", () => {
         hidden.querySelectorAll(".codex-menu-accounts__email").length,
       ).toBe(2);
     });
-    const hiddenEmail = hidden.querySelectorAll(
+    const ambientLabel = hidden.querySelectorAll(
+      ".codex-menu-accounts__email",
+    )[0] as HTMLElement;
+    expect(ambientLabel.getAttribute("title")).toBe("Account 1");
+    expect(ambientLabel.firstChild?.textContent).toBe("Account 1");
+    expect(ambientLabel.firstChild?.textContent).not.toContain("@");
+    expect(ambientLabel.firstChild?.textContent).not.toContain("example.com");
+
+    const managedEmail = hidden.querySelectorAll(
       ".codex-menu-accounts__email",
     )[1] as HTMLElement;
-    expect(hiddenEmail.getAttribute("title")).toBe(hiddenEmail.textContent);
+    expect(managedEmail.textContent).toBe("user-2@example.com");
+    const switches = hidden.querySelectorAll(
+      ".codex-menu-accounts__switch",
+    ) as NodeListOf<HTMLButtonElement>;
+    expect(switches[0].disabled).toBe(true);
+    expect(switches[1].disabled).toBe(false);
 
     const { container: visible } = renderMenu(false, {
       accounts: [account("1", { source: "ambient" }), account("2")],
+      accountOrdinals: { "1": 1, "2": 2 },
       snapshots: {},
     });
     await waitFor(() => {
@@ -224,6 +245,30 @@ describe("CodexAccountsMenu", () => {
       ".codex-menu-accounts__email",
     )[1] as HTMLElement;
     expect(rawEmail.getAttribute("title")).toBe("user-2@example.com");
+  });
+
+  it("uses canonical opaque ordinals supplied by the account bridge", async () => {
+    const first = account("uuid-b", {
+      emailHint: "alice@example.com",
+      nickname: "team@example.com",
+      source: "ambient",
+    });
+    const second = account("uuid-a", {
+      emailHint: "bob@example.com",
+      nickname: "Private workspace",
+    });
+
+    const { container } = renderMenu(true, {
+      accounts: [first, second],
+      accountOrdinals: { "uuid-b": 2, "uuid-a": 1 },
+      snapshots: {},
+    });
+    await screen.findByText("Account 2");
+    const labels = container.querySelectorAll(".codex-menu-accounts__email");
+    expect(labels[0].firstChild?.textContent).toBe("Account 2");
+    expect(labels[1].textContent).toBe("bob@example.com — Private workspace");
+    expect(labels[0].firstChild?.textContent).not.toContain("@");
+    expect(labels[1].textContent).toContain("Private workspace");
   });
 });
 

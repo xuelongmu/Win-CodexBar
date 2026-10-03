@@ -81,18 +81,30 @@ pub(crate) async fn fetch_via_code_api(
     let json: KimiCodeApiUsageResponse = resp.json().await.map_err(|e| {
         ProviderError::Parse(format!("Failed to parse Kimi Code API response: {e}"))
     })?;
+    let plan_name = json.plan_name();
+    let has_plan_name = plan_name.is_some();
     let mut snapshot = snapshot_from_code_api_response(json)?;
-    snapshot.login_method = Some(login_method.to_string());
+    snapshot.login_method = Some(plan_name.unwrap_or_else(|| login_method.to_string()));
 
     // Upstream #2622: enrich Code API + CLI usage with the monthly membership
     // pool from a signed-in Kimi Desktop (or browser/manual) session.
-    if let Some(web_token) = web::web_auth_token(ctx.manual_cookie_header.as_deref()) {
-        match web::fetch_subscription_for_enrichment(&client, &web_token).await {
-            Some(subscription) => {
-                snapshot = super::apply_subscription_windows(snapshot, &subscription);
+    for web_token in web::web_auth_tokens(ctx.manual_cookie_header.as_deref()) {
+        match web::fetch_subscription_for_enrichment_result(&client, &web_token).await {
+            Ok(subscription) => {
+                if let Some(subscription) = subscription {
+                    snapshot = super::apply_subscription_windows(snapshot, &subscription);
+                }
+                if !has_plan_name
+                    && let Some(plan) = web::fetch_subscription_plan(&client, &web_token).await
+                {
+                    snapshot.login_method = Some(plan);
+                }
+                break;
             }
-            None => {
-                tracing::debug!("Kimi Code monthly enrichment unavailable");
+            Err(ProviderError::AuthRequired) => continue,
+            Err(error) => {
+                tracing::debug!(error = %error, "Kimi Code monthly enrichment unavailable");
+                break;
             }
         }
     }
@@ -103,19 +115,56 @@ pub(crate) async fn fetch_via_code_api(
 pub(super) fn snapshot_from_code_api_response(
     response: KimiCodeApiUsageResponse,
 ) -> Result<UsageSnapshot, ProviderError> {
-    let primary = KimiProvider::rate_window_from_usage_detail(&response.usage, None)?;
-    let mut usage = UsageSnapshot::new(primary).with_login_method("Code API");
-
-    if let Some(limit) = response.limits.unwrap_or_default().into_iter().next() {
+    let pools_present = response.usages.is_some();
+    let session_pool = response
+        .usages
+        .as_ref()
+        .and_then(|pools| pools.session.as_ref())
+        .and_then(|pool| pool.rate_window(300));
+    let weekly_pool = response
+        .usages
+        .as_ref()
+        .and_then(|pools| pools.weekly.as_ref())
+        .and_then(|pool| pool.rate_window(10_080));
+    let monthly_pool = response
+        .usages
+        .as_ref()
+        .and_then(|pools| pools.monthly.as_ref())
+        .and_then(|pool| pool.rate_window(43_200));
+    let primary = if pools_present {
+        session_pool.ok_or_else(|| {
+            ProviderError::Parse("Kimi Code API returned an unusable session quota pool".into())
+        })?
+    } else {
+        response
+            .usage
+            .as_ref()
+            .and_then(|detail| KimiProvider::rate_window_from_usage_detail(detail, None).ok())
+            .ok_or_else(|| {
+                ProviderError::Parse("Kimi Code API has no usable quota window".into())
+            })?
+    };
+    let mut usage = UsageSnapshot::new(primary).with_login_method(
+        response
+            .plan_name()
+            .unwrap_or_else(|| "Code API".to_string()),
+    );
+    if let Some(weekly) = weekly_pool {
+        usage = usage.with_secondary(weekly);
+    } else if !pools_present
+        && let Some(limit) = response.limits.unwrap_or_default().into_iter().next()
+    {
         let window_minutes = limit.window.as_ref().and_then(kimi_window_minutes);
-        let rate_limit =
-            KimiProvider::rate_window_from_usage_detail(&limit.detail, window_minutes)?;
-        usage = usage.with_secondary(rate_limit);
+        usage = usage.with_secondary(KimiProvider::rate_window_from_usage_detail(
+            &limit.detail,
+            window_minutes,
+        )?);
     }
-
+    if let Some(monthly) = monthly_pool {
+        usage = usage.with_tertiary(monthly);
+    }
     Ok(usage)
 }
-
 pub(crate) fn code_api_key(explicit: Option<&str>) -> Result<String, ProviderError> {
     if let Some(key) = explicit.map(str::trim).filter(|key| !key.is_empty()) {
         return Ok(key.to_string());
@@ -371,5 +420,58 @@ mod tests {
     #[test]
     fn credential_freshness_requires_sixty_second_margin() {
         assert!((KIMI_CODE_CREDENTIAL_MIN_TTL_SECS - 60.0).abs() < f64::EPSILON);
+    }
+    #[test]
+    fn ratio_pools_preserve_unknown_weekly_and_explicit_monthly_zero() {
+        let response: KimiCodeApiUsageResponse = serde_json::from_value(json!({
+            "usages": {
+                "limit_5h": { "used_ratio": 0.25 },
+                "limit_7d": null,
+                "limit_month_total": { "used_ratio": 0 }
+            },
+            "limits": [{
+                "window": { "duration": 7, "timeUnit": "TIME_UNIT_DAY" },
+                "detail": { "limit": "100", "used": "99" }
+            }]
+        }))
+        .expect("ratio-pool fixture parses");
+        let snapshot = snapshot_from_code_api_response(response).expect("ratio pools are usable");
+        assert_eq!(snapshot.primary.window_minutes, Some(300));
+        assert_eq!(snapshot.primary.used_percent, 25.0);
+        assert!(
+            snapshot.secondary.is_none(),
+            "missing weekly pool stays unknown"
+        );
+        let monthly = snapshot.tertiary.expect("explicit monthly zero is known");
+        assert_eq!(monthly.window_minutes, Some(43_200));
+        assert_eq!(monthly.used_percent, 0.0);
+        assert!(monthly.usage_known);
+    }
+
+    #[test]
+    fn ratio_pools_do_not_invent_zero_for_missing_or_invalid_primary() {
+        for fixture in [
+            json!({ "usages": { "limit_5h": {} } }),
+            json!({ "usages": { "limit_5h": { "used_ratio": -0.1 } } }),
+        ] {
+            let response: KimiCodeApiUsageResponse =
+                serde_json::from_value(fixture).expect("fixture parses");
+            assert!(snapshot_from_code_api_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn unusable_explicit_session_pool_does_not_fall_back_to_legacy_usage() {
+        let response: KimiCodeApiUsageResponse = serde_json::from_value(json!({
+            "usages": { "limit_5h": { "used_ratio": -0.1 } },
+            "usage": { "limit": "100", "used": "20" }
+        }))
+        .expect("fixture parses");
+
+        assert!(matches!(
+            snapshot_from_code_api_response(response),
+            Err(ProviderError::Parse(message))
+                if message.contains("unusable session quota pool")
+        ));
     }
 }

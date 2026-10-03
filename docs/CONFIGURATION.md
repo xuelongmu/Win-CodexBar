@@ -105,6 +105,28 @@ When credential reading is disabled, active-account status is unknown and every
 saved account remains switchable. The list does not open ambient credential or
 identity files. Explicitly selecting the already-current account is a no-op.
 
+## Grok accounts
+
+In **Settings → Providers → Grok → Grok accounts**, use **Save current
+account** to retain the existing `~/.grok/auth.json` login, or **Add account**
+to run `grok login --oauth` in an isolated `GROK_HOME`. Finish that sign-in in
+the Firefox profile (or browser) for the second SuperGrok account. Adding an
+account leaves the current CLI login active until you **Switch**.
+
+The tray **Grok accounts** submenu provides the same actions. Win-CodexBar
+saves the outgoing login before switching. **Remove** forgets the saved copy;
+it does not log out the active CLI session. Restart running Grok CLI sessions
+after a switch.
+
+Saved logins are protected with the existing Windows DPAPI storage helper under
+`%APPDATA%\CodexBar\grok-accounts\accounts.json`. Sign-in uses a temporary
+`GROK_HOME`; successful, failed, cancelled, and timed-out attempts clean up
+that directory. Switching replaces only `~/.grok/auth.json` (or
+`$GROK_HOME/auth.json` when that environment variable is set). Sessions,
+skills, and other Grok home files stay in place. `XAI_API_KEY` and
+`GROK_OAUTH_TOKEN` are unset for the isolated sign-in so the browser OAuth
+flow is used.
+
 ## Source mode
 
 CLI `--source` values on this port (see `codexbar usage --help`): `auto`, `web`, `cli`, `oauth`.
@@ -113,7 +135,18 @@ Upstream also documents `api` extensively; treat per-provider support as defined
 
 ## Hooks
 
-Upstream documents a rich `hooks` block in JSON config. This port exposes `codexbar hooks` for list/enable/disable/test. Configure trusted local executables only; never point hooks at untrusted paths. Prefer reading `codexbar hooks --help` and Settings UI for the supported surface on the version you run.
+The shared `hooks.json` rules can match `usage_updated` in addition to the
+quota and provider-status events. The desktop refresh path emits it after a
+successful, current provider publication; `codexbar hooks watch` emits it after
+`provider.fetch_usage` succeeds without publishing a provider snapshot. Its
+payload can include primary and secondary usage fractions, window durations,
+and reset timestamps. A failed or superseded refresh does not produce a
+successful-update event.
+
+Repeated `usage_updated` events are limited to one per provider account per ten
+minutes in memory. The account discriminator used for that private limit is
+never serialized or passed to the hook process. Configure trusted local
+executables only; never point hooks at untrusted paths.
 
 ## Start at login (Windows)
 

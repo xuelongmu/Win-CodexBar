@@ -3,7 +3,7 @@
 //! Default-disabled. Auth via manual cookie or browser import for longcat.chat.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use reqwest::Client;
 use serde_json::Value;
 
@@ -38,6 +38,7 @@ impl LongCatProvider {
                 is_primary: false,
                 dashboard_url: Some("https://longcat.chat/platform/"),
                 status_page_url: None,
+                tertiary_label_key: None,
             },
             // Isolated cookie-free client — auth is only the explicit Cookie header.
             client: crate::core::credentialed_http_client_builder()
@@ -124,7 +125,7 @@ impl Provider for LongCatProvider {
                 };
                 let account = self.get_json(USER_CURRENT, &cookie).await?;
                 // Meituan-style envelope may return HTTP 200 with business 401.
-                if let Some(code) = envelope_code(&account)
+                if let Some(code) = envelope_code(&account)?
                     && (code == 401 || code == 403)
                 {
                     return Err(ProviderError::AuthRequired);
@@ -180,11 +181,16 @@ fn normalize_cookie_header(raw: &str) -> Option<String> {
     (!header.is_empty()).then_some(header)
 }
 
-fn envelope_code(value: &Value) -> Option<i64> {
+fn envelope_code(value: &Value) -> Result<Option<i64>, ProviderError> {
     value
         .get("code")
-        .and_then(|c| c.as_i64())
-        .or_else(|| value.get("status").and_then(|c| c.as_i64()))
+        .or_else(|| value.get("status"))
+        .map(|raw| {
+            json_integer(raw).ok_or_else(|| {
+                ProviderError::Parse("LongCat response code was not a valid integer".into())
+            })
+        })
+        .transpose()
 }
 
 fn envelope_data(value: &Value) -> &Value {
@@ -192,10 +198,58 @@ fn envelope_data(value: &Value) -> &Value {
 }
 
 fn json_f64(value: &Value, key: &str) -> Option<f64> {
-    let v = value.get(key)?;
-    v.as_f64()
-        .or_else(|| v.as_i64().map(|i| i as f64))
-        .or_else(|| v.as_str()?.parse().ok())
+    value.get(key).and_then(json_number)
+}
+
+fn json_number(value: &Value) -> Option<f64> {
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|number| number as f64))
+        .or_else(|| value.as_str()?.trim().parse().ok())?;
+    number.is_finite().then_some(number)
+}
+
+fn json_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().and_then(truncate_to_i64))
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .or_else(|| {
+            value
+                .as_str()?
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(truncate_to_i64)
+        })
+}
+
+fn truncate_to_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+    let truncated = value.trunc();
+    // `i64::MAX as f64` rounds up to 2^63, so keep that boundary exclusive.
+    if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the finite value was range-checked before conversion"
+    )]
+    Some(truncated as i64)
+}
+
+fn whole_number(value: f64) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    let normalized = if value.trunc() == 0.0 {
+        0.0
+    } else {
+        value.trunc()
+    };
+    Some(format!("{normalized:.0}"))
 }
 
 fn json_str(value: &Value, key: &str) -> Option<String> {
@@ -254,19 +308,16 @@ fn build_snapshot(
         ));
     };
 
-    let primary = if total > 0.0 {
+    let primary = if total.is_finite() && total > 0.0 && used.is_finite() {
         let mut w = RateWindow::new(((used / total) * 100.0).clamp(0.0, 100.0));
-        // Display-only rendering of token counts; values beyond i64 are
-        // unrealistic quota sizes and would only affect this label.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "display-only quota label; token counts beyond i64 are unrealistic"
-        )]
-        let desc = format!("{}/{}", used as i64, total as i64);
-        w.reset_description = Some(desc);
+        if let (Some(used_text), Some(total_text)) = (whole_number(used), whole_number(total)) {
+            w.reset_description = Some(format!("{used_text}/{total_text}"));
+        }
         w
-    } else {
+    } else if total.is_finite() && total <= 0.0 {
         RateWindow::informational("No token quota")
+    } else {
+        RateWindow::informational("Token quota unavailable")
     };
 
     let account_name = json_str(account_data, "name")
@@ -281,19 +332,20 @@ fn build_snapshot(
     if let Some(fuel_raw) = fuel_raw {
         let fuel_data = envelope_data(fuel_raw);
         if let Some((total_fuel, remaining_fuel, expiry)) = parse_fuel(fuel_data)
+            && total_fuel.is_finite()
+            && remaining_fuel.is_finite()
             && total_fuel > 0.0
         {
             let used_fuel = (total_fuel - remaining_fuel).max(0.0);
             let mut secondary =
                 RateWindow::new(((used_fuel / total_fuel) * 100.0).clamp(0.0, 100.0));
             secondary.resets_at = expiry;
-            // Same display-only label for fuel-pack counts.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "display-only fuel label; fuel counts beyond i64 are unrealistic"
-            )]
-            let fuel_desc = format!("Fuel pack: {}/{}", remaining_fuel as i64, total_fuel as i64);
-            secondary.reset_description = Some(fuel_desc);
+            if let (Some(remaining_text), Some(total_text)) =
+                (whole_number(remaining_fuel), whole_number(total_fuel))
+            {
+                secondary.reset_description =
+                    Some(format!("Fuel pack: {remaining_text}/{total_text}"));
+            }
             snap = snap.with_secondary(secondary);
         }
     }
@@ -305,10 +357,14 @@ fn parse_fuel(fuel: &Value) -> Option<(f64, f64, Option<DateTime<Utc>>)> {
     // Accept either { packages: [...] } or a bare array.
     let packages = fuel
         .get("packages")
+        .or_else(|| fuel.get("list"))
         .and_then(|p| p.as_array())
         .or_else(|| fuel.as_array())?;
 
-    let mut total = 0.0;
+    let declared_total = json_f64(fuel, "totalQuota")
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(0.0);
+    let mut package_total = 0.0;
     let mut remaining = 0.0;
     let mut saw_remaining = false;
     let mut nearest: Option<DateTime<Utc>> = None;
@@ -318,7 +374,7 @@ fn parse_fuel(fuel: &Value) -> Option<(f64, f64, Option<DateTime<Utc>>)> {
             .or_else(|| json_f64(pkg, "total"))
             .or_else(|| json_f64(pkg, "amount"))
         {
-            total += t.max(0.0);
+            package_total += t.max(0.0);
         }
         if let Some(r) = json_f64(pkg, "availableToken")
             .or_else(|| json_f64(pkg, "remainingToken"))
@@ -327,19 +383,24 @@ fn parse_fuel(fuel: &Value) -> Option<(f64, f64, Option<DateTime<Utc>>)> {
             remaining += r.max(0.0);
             saw_remaining = true;
         }
-        if let Some(raw) = json_str(pkg, "expireTime")
-            .or_else(|| json_str(pkg, "expireAt"))
-            .or_else(|| json_str(pkg, "expiresAt"))
-            && let Ok(dt) = DateTime::parse_from_rfc3339(&raw)
+        if let Some(raw) = pkg
+            .get("expireTime")
+            .or_else(|| pkg.get("expireAt"))
+            .or_else(|| pkg.get("expiresAt"))
+            && let Some(dt) = parse_fuel_timestamp(raw)
         {
-            let utc = dt.with_timezone(&Utc);
             nearest = Some(match nearest {
-                Some(n) if n < utc => n,
-                _ => utc,
+                Some(n) if n < dt => n,
+                _ => dt,
             });
         }
     }
 
+    let mut total = if declared_total > 0.0 {
+        declared_total
+    } else {
+        package_total
+    };
     if total <= 0.0 && !saw_remaining {
         return None;
     }
@@ -348,6 +409,38 @@ fn parse_fuel(fuel: &Value) -> Option<(f64, f64, Option<DateTime<Utc>>)> {
     }
     let remaining = if saw_remaining { remaining } else { total };
     Some((total, remaining, nearest))
+}
+
+fn parse_fuel_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    if let Some(number) = json_number(value) {
+        if !number.is_finite() {
+            return None;
+        }
+        let millis = if number > 1_000_000_000_000.0 {
+            number
+        } else {
+            number * 1000.0
+        };
+        if millis <= 1_000_000_000_000.0 || millis >= i64::MAX as f64 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "validated Unix timestamp is within i64 millisecond range"
+        )]
+        let millis = millis as i64;
+        return Utc.timestamp_millis_opt(millis).single();
+    }
+
+    let raw = value.as_str()?.trim();
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|date| date.with_timezone(&Utc))
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|date| Utc.from_utc_datetime(&date))
+        })
 }
 
 #[cfg(test)]
@@ -377,6 +470,24 @@ mod tests {
         assert_eq!(snap.account_organization.as_deref(), Some("cat"));
         let fuel_w = snap.secondary.unwrap();
         assert!((fuel_w.used_percent - 75.0).abs() < 0.01);
+        assert_eq!(
+            fuel_w.resets_at.map(|value| value.to_rfc3339()),
+            Some("2026-08-01T00:00:00+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_list_fuel_with_numeric_expiry() {
+        let expiry = Utc.with_ymd_and_hms(2026, 9, 20, 12, 34, 56).unwrap();
+        let fuel = json!({
+            "totalQuota": 200,
+            "list": [{ "availableToken": 50, "expireTime": expiry.timestamp_millis() }]
+        });
+
+        let (total, remaining, nearest) = parse_fuel(&fuel).expect("fuel package");
+        assert_eq!(total, 200.0);
+        assert_eq!(remaining, 50.0);
+        assert_eq!(nearest, Some(expiry));
     }
 
     #[test]
@@ -429,5 +540,50 @@ mod tests {
             normalize_cookie_header("Cookie: a=1; b=2").as_deref(),
             Some("a=1; b=2")
         );
+    }
+
+    #[test]
+    fn rejects_unrepresentable_response_codes() {
+        let error = envelope_code(&json!({ "code": "Infinity" })).unwrap_err();
+        assert!(matches!(error, ProviderError::Parse(_)));
+        assert_eq!(envelope_code(&json!({ "code": 200.9 })).unwrap(), Some(200));
+    }
+
+    #[test]
+    fn formats_large_counts_without_i64_saturation() {
+        let account = json!({ "code": 0, "data": { "name": "cat" } });
+        let usage = json!({
+            "code": 0,
+            "data": {
+                "usage": {
+                    "totalToken": 2e20,
+                    "availableToken": 1e20
+                }
+            }
+        });
+        let snapshot = build_snapshot(&account, None, Some(&usage), None).unwrap();
+        assert_eq!(
+            snapshot.primary.reset_description.as_deref(),
+            Some("100000000000000000000/200000000000000000000")
+        );
+        assert!(snapshot.primary.used_percent.is_finite());
+    }
+
+    #[test]
+    fn omits_fuel_window_when_counts_overflow() {
+        let account = json!({ "code": 0 });
+        let usage = json!({
+            "data": { "usage": { "totalToken": 100, "availableToken": 50 } }
+        });
+        let fuel = json!({
+            "totalQuota": 1e308,
+            "list": [
+                { "availableToken": 1e308 },
+                { "availableToken": 1e308 }
+            ]
+        });
+        let snapshot = build_snapshot(&account, None, Some(&usage), Some(&fuel)).unwrap();
+        assert!(snapshot.secondary.is_none());
+        assert!(snapshot.primary.used_percent.is_finite());
     }
 }

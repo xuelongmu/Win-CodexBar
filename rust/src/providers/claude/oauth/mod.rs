@@ -50,6 +50,43 @@ impl ClaudeOAuthCredentials {
     }
 }
 
+/// Return a non-secret identity for the credential that would authorize a
+/// Claude CLI session. JWT subjects survive token rotation; opaque tokens use
+/// a one-way fingerprint and therefore fail closed if the credential changes.
+pub(super) fn credential_identity(credentials: &ClaudeOAuthCredentials) -> Option<String> {
+    let token = credentials.access_token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    if let Some(subject) = crate::codex_accounts::api::jwt_payload(token).and_then(|payload| {
+        ["sub", "account_id", "user_id"]
+            .into_iter()
+            .find_map(|key| {
+                payload
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+    }) {
+        return Some(format!("claude-account:{subject}"));
+    }
+
+    Some(format!(
+        "claude-credential:{}",
+        crate::core::sha256_hex(token.as_bytes())
+    ))
+}
+
+/// Load the identity used to authorize Claude Code. Reading Claude Code's
+/// credential stores remains subject to the user's explicit consent setting.
+pub(super) fn auto_resume_identity() -> Option<String> {
+    let (credentials, _) = credentials_store::load_credentials().ok()?;
+    credential_identity(&credentials)
+}
+
 /// OAuth usage response from Claude API
 #[derive(Debug, Deserialize)]
 pub struct OAuthUsageResponse {
@@ -115,7 +152,12 @@ pub struct ClaudeOAuthFetcher {
     client: Client,
 }
 
-static RATE_LIMIT_BACKOFF_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+struct RateLimitGate {
+    until: Instant,
+    consecutive: u32,
+}
+
+static RATE_LIMIT_BACKOFF_UNTIL: OnceLock<Mutex<Option<RateLimitGate>>> = OnceLock::new();
 
 // ── Refresh-token backoff (upstream 0.48.0 #2650) ────────────────────────────
 //
@@ -241,16 +283,26 @@ impl ClaudeOAuthFetcher {
     /// without the user having to re-run `claude`.
     pub async fn fetch(&self) -> Result<ProviderFetchResult, ProviderError> {
         let _account_operation = super::accounts::CREDENTIAL_OPERATION.lock().await;
+        let account_manager = super::accounts::AccountManager::new().ok();
+        let saved_account_id = account_manager
+            .as_ref()
+            .and_then(|manager| manager.current_account_id().ok().flatten());
         let (credentials, source) = credentials_store::load_credentials()?;
-        let (credentials, refresh_outcome) =
-            self.ensure_fresh_credentials(credentials, source).await;
+        let (credentials, refresh_outcome) = self
+            .ensure_fresh_credentials(
+                credentials,
+                source,
+                account_manager.as_ref(),
+                saved_account_id.as_deref(),
+            )
+            .await;
         // Still-expired credentials with a terminal/gated refresh state get the
         // honest message instead of a generic "expired" error (or another
         // doomed API call).
         if credentials.is_expired()
-            && let Some(message) = refresh_outcome
+            && let Some(error) = refresh_outcome
         {
-            return Err(ProviderError::OAuth(message));
+            return Err(error);
         }
         self.fetch_with_credentials(credentials).await
     }
@@ -284,7 +336,11 @@ impl ClaudeOAuthFetcher {
     ) -> Result<ProviderFetchResult, ProviderError> {
         let usage_response = self.fetch_usage(&credentials).await?;
         let usage = self.build_usage_snapshot(&usage_response, &credentials);
-        Ok(ProviderFetchResult::new(usage, "oauth"))
+        let mut result = ProviderFetchResult::new(usage, "oauth");
+        if let Some(identity) = credential_identity(&credentials) {
+            result = result.with_account_identity(identity);
+        }
+        Ok(result)
     }
 
     /// If the token is expired (or about to expire), refresh it using the
@@ -297,31 +353,28 @@ impl ClaudeOAuthFetcher {
         &self,
         mut credentials: ClaudeOAuthCredentials,
         source: credentials_store::CredentialSource,
-    ) -> (ClaudeOAuthCredentials, Option<String>) {
+        account_manager: Option<&super::accounts::AccountManager>,
+        saved_account_id: Option<&str>,
+    ) -> (ClaudeOAuthCredentials, Option<ProviderError>) {
         // Prefer an in-memory refreshed token if it is fresher than what we just
         // read from disk (covers a prior persist that failed to write). Scoped
         // to this credential's own source so a refresh cached for one source
         // (e.g. the credentials file) never shadows another (e.g. an
         // environment-provided token).
-        if let Some(cached) = credentials_store::cached_refreshed_if_fresher(&source, &credentials)
+        let recovered_from_cache = if let Some(cached) =
+            credentials_store::cached_refreshed_if_fresher(&source, &credentials)
         {
             credentials = cached;
-        }
+            true
+        } else {
+            false
+        };
 
         if !credentials.is_expired() {
-            return (credentials, None);
-        }
-
-        // The credentials file is shared with the Claude Code CLI, which also
-        // refreshes it. Re-read right before hitting the network: if the CLI (or
-        // a concurrent poll) already refreshed the on-disk token, adopt it rather
-        // than rotating a second refresh token against the same account.
-        if let Ok((disk, disk_source)) = credentials_store::load_credentials() {
-            if !disk.is_expired() {
-                credentials_store::store_refreshed(&disk_source, &disk);
-                return (disk, None);
+            if recovered_from_cache {
+                self.persist_refreshed_state(&credentials, account_manager, saved_account_id);
             }
-            credentials = disk;
+            return (credentials, None);
         }
 
         let Some(refresh_token) = credentials.refresh_token.clone() else {
@@ -334,32 +387,62 @@ impl ClaudeOAuthFetcher {
         // transient failure should not hammer the endpoint every poll.
         let now = Instant::now();
         if let Some(kind) = active_refresh_backoff(&source, now, Some(refresh_token.as_str())) {
-            let message = match kind {
-                refresh::RefreshFailureKind::Terminal => terminal_refresh_message(),
-                refresh::RefreshFailureKind::Transient => refresh_cooldown_message(),
+            let error = match kind {
+                refresh::RefreshFailureKind::Terminal => {
+                    ProviderError::OAuth(terminal_refresh_message())
+                }
+                refresh::RefreshFailureKind::Transient => {
+                    ProviderError::OAuthTransient(refresh_cooldown_message())
+                }
             };
-            return (credentials, Some(message));
+            return (credentials, Some(error));
         }
 
         match refresh::refresh_access_token(&self.client, &refresh_token, &credentials).await {
             Ok(refreshed) => {
                 clear_refresh_backoff(&source);
                 credentials_store::store_refreshed(&source, &refreshed);
-                if let Err(err) = credentials_store::persist_refreshed_credentials(&refreshed) {
-                    tracing::debug!("Claude OAuth token refreshed but could not persist: {err}");
-                }
+                self.persist_refreshed_state(&refreshed, account_manager, saved_account_id);
                 tracing::debug!("Refreshed expired Claude OAuth token");
                 (refreshed, None)
             }
             Err(failure) => {
                 tracing::debug!("Claude OAuth token refresh failed: {}", failure.message);
-                let message = match failure.kind {
-                    refresh::RefreshFailureKind::Terminal => Some(terminal_refresh_message()),
-                    refresh::RefreshFailureKind::Transient => Some(refresh_cooldown_message()),
+                let error = match failure.kind {
+                    refresh::RefreshFailureKind::Terminal => {
+                        ProviderError::OAuth(terminal_refresh_message())
+                    }
+                    refresh::RefreshFailureKind::Transient => {
+                        ProviderError::OAuthTransient(refresh_cooldown_message())
+                    }
                 };
                 record_refresh_backoff(&source, failure.kind, now, Some(refresh_token.as_str()));
-                (credentials, message)
+                (credentials, Some(error))
             }
+        }
+    }
+
+    /// Reconcile the saved account before the live credentials file. If either
+    /// write fails, the in-memory refreshed value remains newer than disk and
+    /// the next poll retries this same path without rotating the token again.
+    fn persist_refreshed_state(
+        &self,
+        refreshed: &ClaudeOAuthCredentials,
+        account_manager: Option<&super::accounts::AccountManager>,
+        saved_account_id: Option<&str>,
+    ) {
+        if let (Some(manager), Some(account_id)) = (account_manager, saved_account_id) {
+            let refreshed_oauth = Self::refreshed_oauth_value(refreshed);
+            if let Err(err) = manager.update_saved_oauth(account_id, &refreshed_oauth) {
+                tracing::debug!(
+                    "Claude OAuth token refreshed but saved account store was not updated: {err}"
+                );
+                return;
+            }
+        }
+
+        if let Err(err) = credentials_store::persist_refreshed_credentials(refreshed) {
+            tracing::debug!("Claude OAuth token refreshed but could not persist: {err}");
         }
     }
 
@@ -433,8 +516,8 @@ impl ClaudeOAuthFetcher {
             }
 
             if status.as_u16() == 429 {
-                Self::record_rate_limit(retry_after);
-                return Err(Self::rate_limited_error(retry_after));
+                let backoff = Self::record_rate_limit(retry_after);
+                return Err(Self::rate_limited_error(backoff));
             }
 
             return Err(ProviderError::OAuth(format!(
@@ -453,26 +536,59 @@ impl ClaudeOAuthFetcher {
         Ok(usage)
     }
 
-    fn rate_limit_gate() -> &'static Mutex<Option<Instant>> {
+    fn rate_limit_gate() -> &'static Mutex<Option<RateLimitGate>> {
         RATE_LIMIT_BACKOFF_UNTIL.get_or_init(|| Mutex::new(None))
     }
 
     fn rate_limit_backoff_remaining() -> Option<Duration> {
         let mut guard = Self::rate_limit_gate().lock().ok()?;
-        let until = (*guard)?;
+        let gate = guard.as_ref()?;
         let now = Instant::now();
-        if until <= now {
+        if gate.until <= now {
             *guard = None;
             None
         } else {
-            Some(until.saturating_duration_since(now))
+            Some(gate.until.saturating_duration_since(now))
         }
     }
 
-    fn record_rate_limit(duration: Duration) {
-        if let Ok(mut guard) = Self::rate_limit_gate().lock() {
-            *guard = Some(Instant::now() + duration);
+    /// Anthropic often returns `Retry-After: 0` or `1` on the usage endpoint.
+    /// Honoring that literally re-hits 429 on the next poll and, after a
+    /// last-good miss, the tray maps the generic OAuth error to sign-in.
+    fn bounded_rate_limit_backoff(retry_after: Duration, consecutive: u32) -> Duration {
+        let floor = Self::DEFAULT_RATE_LIMIT_BACKOFF;
+        let cap = Duration::from_secs(60 * 60);
+        let shift = consecutive.saturating_sub(1).min(3);
+        let exponential = floor.saturating_mul(1u32 << shift);
+        retry_after.max(floor).max(exponential).min(cap)
+    }
+
+    fn record_rate_limit(retry_after: Duration) -> Duration {
+        let Ok(mut guard) = Self::rate_limit_gate().lock() else {
+            return Self::bounded_rate_limit_backoff(retry_after, 1);
+        };
+        Self::record_rate_limit_locked(&mut guard, Instant::now(), retry_after)
+    }
+
+    fn record_rate_limit_locked(
+        gate: &mut Option<RateLimitGate>,
+        now: Instant,
+        retry_after: Duration,
+    ) -> Duration {
+        if gate.as_ref().is_some_and(|gate| gate.until <= now) {
+            *gate = None;
         }
+        let consecutive = gate
+            .as_ref()
+            .map(|gate| gate.consecutive)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let backoff = Self::bounded_rate_limit_backoff(retry_after, consecutive);
+        *gate = Some(RateLimitGate {
+            until: now + backoff,
+            consecutive,
+        });
+        backoff
     }
 
     fn clear_rate_limit() {
@@ -504,10 +620,20 @@ impl ClaudeOAuthFetcher {
     }
 
     fn rate_limited_error(duration: Duration) -> ProviderError {
-        ProviderError::OAuth(format!(
+        ProviderError::OAuthTransient(format!(
             "Claude OAuth usage endpoint is rate limited. Retrying in about {}s; credentials were preserved.",
             duration.as_secs().max(1)
         ))
+    }
+
+    fn refreshed_oauth_value(credentials: &ClaudeOAuthCredentials) -> serde_json::Value {
+        serde_json::json!({
+            "accessToken": credentials.access_token,
+            "refreshToken": credentials.refresh_token,
+            "expiresAt": credentials.expires_at.map(|expires_at| expires_at.timestamp_millis()),
+            "scopes": credentials.scopes,
+            "rateLimitTier": credentials.rate_limit_tier,
+        })
     }
 
     /// Build UsageSnapshot from OAuth response
@@ -515,16 +641,6 @@ impl ClaudeOAuthFetcher {
         &self,
         response: &OAuthUsageResponse,
         credentials: &ClaudeOAuthCredentials,
-    ) -> UsageSnapshot {
-        let show_routines = crate::settings::Settings::load().claude_daily_routines_usage_visible;
-        self.build_usage_snapshot_with_options(response, credentials, show_routines)
-    }
-
-    fn build_usage_snapshot_with_options(
-        &self,
-        response: &OAuthUsageResponse,
-        credentials: &ClaudeOAuthCredentials,
-        show_routines: bool,
     ) -> UsageSnapshot {
         // Primary: prefer limits[] session over legacy five_hour (mirrors the
         // weekly lane preferring weekly_all over seven_day). A stale
@@ -538,7 +654,7 @@ impl ClaudeOAuthFetcher {
                     .as_ref()
                     .and_then(|w| Self::to_rate_window(w, Some(300)))
             })
-            .unwrap_or_else(|| RateWindow::new(0.0));
+            .unwrap_or_else(RateWindow::no_active_session);
 
         let mut usage = UsageSnapshot::new(primary);
 
@@ -577,11 +693,10 @@ impl ClaudeOAuthFetcher {
                 &response.limits,
             ));
 
-        if show_routines
-            && let Some(window) = response
-                .seven_day_routines
-                .as_ref()
-                .and_then(|w| Self::to_rate_window(w, Some(10080)))
+        if let Some(window) = response
+            .seven_day_routines
+            .as_ref()
+            .and_then(|w| Self::to_rate_window(w, Some(10080)))
         {
             usage.extra_rate_windows.push(NamedRateWindow::new(
                 "claude-routines",

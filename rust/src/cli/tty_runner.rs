@@ -191,83 +191,18 @@ impl TtyCommandRunner {
     pub fn which(tool: &str) -> Option<PathBuf> {
         // Check for specific tool overrides
         if tool == "codex"
-            && let Some(path) = Self::locate_codex_binary()
+            && let Some(path) = crate::codex_cli::locate_codex_binary()
         {
             return Some(path);
         }
         if tool == "claude"
-            && let Some(path) = Self::locate_claude_binary()
+            && let Some(path) = crate::providers::claude::locate_claude_binary()
         {
             return Some(path);
         }
 
         // Use `where` on Windows (equivalent to `which` on Unix)
         Self::run_where(tool)
-    }
-
-    /// Locate the Codex binary
-    fn locate_codex_binary() -> Option<PathBuf> {
-        // Check environment override
-        if let Ok(path) = std::env::var("CODEX_BINARY") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-
-        // Check common Windows locations
-        let candidates = [
-            // npm global install locations
-            dirs::data_local_dir().map(|d| d.join("npm").join("codex.cmd")),
-            dirs::home_dir().map(|h| {
-                h.join("AppData")
-                    .join("Roaming")
-                    .join("npm")
-                    .join("codex.cmd")
-            }),
-            // Bun install
-            dirs::home_dir().map(|h| h.join(".bun").join("bin").join("codex.exe")),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        // Fall back to PATH search
-        Self::run_where("codex")
-    }
-
-    /// Locate the Claude binary
-    fn locate_claude_binary() -> Option<PathBuf> {
-        // Check environment override
-        if let Ok(path) = std::env::var("CLAUDE_BINARY") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-
-        // Check common Windows locations
-        let candidates = [
-            // npm global install locations
-            dirs::data_local_dir().map(|d| d.join("npm").join("claude.cmd")),
-            dirs::home_dir().map(|h| {
-                h.join("AppData")
-                    .join("Roaming")
-                    .join("npm")
-                    .join("claude.cmd")
-            }),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        Self::run_where("claude")
     }
 
     /// Find a binary in PATH.

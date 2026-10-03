@@ -91,6 +91,16 @@ pub struct RateWindow {
     /// Whether this row is an informational value rather than a quota.
     #[serde(default)]
     pub is_informational: bool,
+
+    /// Whether the provider explicitly supplied the usage percentage.
+    /// Internal-only metadata prevents a missing value normalized to zero from
+    /// becoming an exported quota measurement.
+    #[serde(default = "rate_window_usage_known_default", skip_serializing)]
+    pub(crate) usage_known: bool,
+}
+
+fn rate_window_usage_known_default() -> bool {
+    true
 }
 
 impl RateWindow {
@@ -102,6 +112,7 @@ impl RateWindow {
             resets_at: None,
             reset_description: None,
             is_informational: false,
+            usage_known: true,
         }
     }
 
@@ -110,6 +121,7 @@ impl RateWindow {
         Self {
             reset_description: Some(description.into()),
             is_informational: true,
+            usage_known: false,
             ..Self::new(0.0)
         }
     }
@@ -140,7 +152,17 @@ impl RateWindow {
             resets_at,
             reset_description,
             is_informational: false,
+            usage_known: true,
         }
+    }
+
+    pub(crate) fn with_usage_known(mut self, usage_known: bool) -> Self {
+        self.usage_known = usage_known;
+        self
+    }
+
+    pub(crate) fn usage_known(&self) -> bool {
+        self.usage_known
     }
 
     /// Real UTC Gregorian month length ending at `resets_at`, in minutes.
@@ -187,26 +209,7 @@ impl RateWindow {
 
     /// Format the reset time as a countdown string
     pub fn format_countdown(&self) -> Option<String> {
-        let resets_at = self.resets_at?;
-        let now = Utc::now();
-
-        if resets_at <= now {
-            return Some("now".to_string());
-        }
-
-        let duration = resets_at - now;
-        let hours = duration.num_hours();
-        let total_minutes = ((duration.num_seconds() + 59) / 60).max(1);
-        let minutes = total_minutes % 60;
-
-        if hours > 24 {
-            let days = hours / 24;
-            Some(format!("{}d {}h", days, hours % 24))
-        } else if hours > 0 {
-            Some(format!("{}h {}m", hours, minutes))
-        } else {
-            Some(format!("{}m", minutes))
-        }
+        Some(format_countdown_until(self.resets_at?, Utc::now()))
     }
 
     fn finite_percent(value: f64) -> f64 {
@@ -253,6 +256,32 @@ impl Default for RateWindow {
     }
 }
 
+/// Canonical countdown formatting for any future deadline (`{d}d {h}h`,
+/// `{h}h {m}m`, `{m}m`, or `"now"` once elapsed).
+///
+/// [`RateWindow::format_countdown`] delegates here so every surface (tray,
+/// CLI, inventory rows) renders one countdown dialect; the 24-hour boundary
+/// is intentionally `> 24` (exactly 24h renders `"24h 0m"`).
+pub fn format_countdown_until(until: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if until <= now {
+        return "now".to_string();
+    }
+
+    let duration = until - now;
+    let hours = duration.num_hours();
+    let total_minutes = ((duration.num_seconds() + 59) / 60).max(1);
+    let minutes = total_minutes % 60;
+
+    if hours > 24 {
+        let days = hours / 24;
+        format!("{}d {}h", days, hours % 24)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +299,16 @@ mod tests {
         );
         assert_eq!(window.used_percent, 0.0);
         assert_eq!(window.resets_at, None);
+        assert!(!window.usage_known());
+    }
+
+    #[test]
+    fn internal_usage_known_metadata_is_not_serialized() {
+        let window = RateWindow::with_details(0.0, Some(300), None, None).with_usage_known(false);
+        let json = serde_json::to_value(window).expect("rate window JSON");
+
+        assert!(json.get("usage_known").is_none());
+        assert!(json.get("usageKnown").is_none());
     }
 
     #[test]
@@ -394,5 +433,21 @@ mod tests {
         assert_eq!(RateWindowCadence::Weekly.label_key(), "weekly");
         assert_eq!(RateWindowCadence::Monthly.label_key(), "monthly");
         assert_eq!(RateWindowCadence::Unknown.label_key(), "unknown");
+    }
+
+    #[test]
+    fn countdown_exactly_24h_renders_hours_not_days() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 12, 0, 0).unwrap();
+        let until = now + chrono::Duration::hours(24);
+
+        assert_eq!(format_countdown_until(until, now), "24h 0m");
+    }
+
+    #[test]
+    fn countdown_elapsed_deadline_renders_now() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 12, 0, 0).unwrap();
+        let until = now - chrono::Duration::seconds(5);
+
+        assert_eq!(format_countdown_until(until, now), "now");
     }
 }

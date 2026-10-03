@@ -20,6 +20,8 @@ fn test_settings_default() {
     assert!(!settings.show_reset_when_exhausted);
     assert!(!settings.predictive_pace_warning_enabled);
     assert!(!settings.float_bar_show_cost);
+    assert!(!settings.tray_panel_always_on_top);
+    assert_eq!(settings.overview_layout, "compact");
     assert!(settings.promote_tray_icon);
     assert!(settings.claude_daily_routines_usage_visible);
     assert!(!settings.claude_allow_reading_claude_code_credentials);
@@ -27,6 +29,44 @@ fn test_settings_default() {
         settings.low_power_mode_preference,
         LowPowerModePreference::Off
     );
+}
+
+#[test]
+fn overview_layout_defaults_to_compact_and_round_trips() {
+    let defaulted: Settings = serde_json::from_str(r#"{ "enabled_providers": [] }"#)
+        .expect("missing overview layout defaults to compact");
+    assert_eq!(defaulted.overview_layout, "compact");
+
+    let compact = Settings {
+        overview_layout: "compact".to_string(),
+        ..Settings::default()
+    };
+    let json = serde_json::to_string(&compact).expect("serialize overview layout");
+    let loaded: Settings = serde_json::from_str(&json).expect("deserialize overview layout");
+    assert_eq!(loaded.overview_layout, "compact");
+
+    let unknown: Settings =
+        serde_json::from_str(r#"{ "enabled_providers": [], "overview_layout": "unsupported" }"#)
+            .expect("unknown overview layout is accepted and normalized");
+    assert_eq!(unknown.overview_layout, "compact");
+}
+
+#[test]
+fn tray_panel_always_on_top_defaults_off_and_round_trips() {
+    let defaulted: Settings = serde_json::from_str(r#"{ "enabled_providers": [] }"#)
+        .expect("missing tray panel topmost field defaults off");
+    assert!(!defaulted.tray_panel_always_on_top);
+
+    let enabled = Settings {
+        tray_panel_always_on_top: true,
+        ..Settings::default()
+    };
+    let json = serde_json::to_string(&enabled).expect("serialize tray panel topmost setting");
+    assert!(json.contains(r#""tray_panel_always_on_top":true"#));
+
+    let loaded: Settings =
+        serde_json::from_str(&json).expect("deserialize tray panel topmost setting");
+    assert!(loaded.tray_panel_always_on_top);
 }
 
 #[test]
@@ -491,6 +531,7 @@ fn test_api_key_provider_catalog_includes_token_providers() {
         ProviderId::Codebuff,
         ProviderId::DeepSeek,
         ProviderId::DeepInfra,
+        ProviderId::HuggingFace,
         ProviderId::AiAnd,
         ProviderId::ElevenLabs,
         ProviderId::Deepgram,
@@ -498,6 +539,7 @@ fn test_api_key_provider_catalog_includes_token_providers() {
         ProviderId::Groq,
         ProviderId::LLMProxy,
         ProviderId::Xai,
+        ProviderId::Meta,
     ] {
         assert!(
             providers.iter().any(|provider| provider.id == id),
@@ -935,6 +977,10 @@ fn test_provider_configs_roundtrip() {
     settings.set_openai_web_extras(ProviderId::Codex, false);
     settings.set_historical_tracking(ProviderId::Codex, true);
     settings.set_avoid_keychain_prompts(ProviderId::Claude, true);
+    settings.set_auto_resume_after_quota_reset(ProviderId::Codex, true);
+    settings
+        .set_seat_credit_entitlement(ProviderId::Copilot, Some(300.0))
+        .expect("valid seat credit entitlement");
 
     let json = serde_json::to_string(&settings).unwrap();
     // The legacy flat fields must NOT appear in serialized output.
@@ -962,6 +1008,11 @@ fn test_provider_configs_roundtrip() {
     assert!(!loaded.openai_web_extras(ProviderId::Codex));
     assert!(loaded.historical_tracking(ProviderId::Codex));
     assert!(loaded.avoid_keychain_prompts(ProviderId::Claude));
+    assert!(loaded.auto_resume_after_quota_reset(ProviderId::Codex));
+    assert_eq!(
+        loaded.seat_credit_entitlement(ProviderId::Copilot),
+        Some(300.0)
+    );
     assert_eq!(
         loaded.provider_configs.get(&ProviderId::Codex),
         settings.provider_configs.get(&ProviderId::Codex)
@@ -1018,6 +1069,8 @@ fn test_per_provider_defaults_applied() {
     assert!(settings.openai_web_extras(ProviderId::Codex));
     assert!(!settings.historical_tracking(ProviderId::Codex));
     assert!(!settings.avoid_keychain_prompts(ProviderId::Claude));
+    assert!(!settings.auto_resume_after_quota_reset(ProviderId::Codex));
+    assert!(!settings.auto_resume_after_quota_reset(ProviderId::Claude));
 }
 
 #[test]
@@ -1030,4 +1083,110 @@ fn codex_spark_usage_visibility_defaults_to_visible_and_roundtrips() {
     let loaded: Settings = serde_json::from_str(&serialized).unwrap();
 
     assert!(!loaded.codex_spark_usage_visible());
+}
+
+#[test]
+fn migrate_legacy_visibility_flags_materializes_hidden_usage_item_ids() {
+    let mut settings = Settings::default();
+    settings.set_spark_usage_visible(ProviderId::Codex, false);
+    settings.claude_daily_routines_usage_visible = false;
+
+    settings.migrate_legacy_usage_item_flags();
+
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Codex),
+        CODEX_SPARK_USAGE_ITEM_IDS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Claude),
+        vec![CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID.to_string()]
+    );
+}
+
+#[test]
+fn generic_claude_visibility_writes_only_the_usage_item_list() {
+    let mut settings = Settings::default();
+
+    settings.set_hidden_usage_item_ids(
+        ProviderId::Claude,
+        vec![CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID.to_string()],
+    );
+
+    assert!(settings.claude_daily_routines_usage_visible);
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Claude),
+        vec![CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID.to_string()]
+    );
+
+    settings.set_hidden_usage_item_ids(ProviderId::Claude, Vec::new());
+
+    assert!(settings.claude_daily_routines_usage_visible);
+    assert!(
+        settings
+            .hidden_usage_item_ids(ProviderId::Claude)
+            .is_empty()
+    );
+}
+
+#[test]
+fn explicit_hidden_usage_item_ids_roundtrip_and_restore_defaults() {
+    let mut settings = Settings::default();
+    settings.set_hidden_usage_item_ids(
+        ProviderId::Codex,
+        vec![
+            "metric:secondary".to_string(),
+            "metric:secondary".to_string(),
+            "not-a-metric".to_string(),
+        ],
+    );
+
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Codex),
+        vec!["metric:secondary".to_string()]
+    );
+    assert!(settings.codex_spark_usage_visible());
+
+    let serialized = serde_json::to_string(&settings).unwrap();
+    let loaded: Settings = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(
+        loaded.hidden_usage_item_ids(ProviderId::Codex),
+        vec!["metric:secondary".to_string()]
+    );
+
+    settings.set_hidden_usage_item_ids(ProviderId::Codex, Vec::new());
+    settings.set_hidden_usage_item_ids(ProviderId::Claude, Vec::new());
+    assert!(settings.hidden_usage_item_ids(ProviderId::Codex).is_empty());
+    assert!(settings.codex_spark_usage_visible());
+}
+
+#[test]
+fn legacy_visibility_setters_preserve_other_explicit_hidden_items() {
+    let mut settings = Settings::default();
+    settings.set_hidden_usage_item_ids(ProviderId::Claude, vec!["metric:secondary".to_string()]);
+
+    settings.toggle_hidden_items(
+        ProviderId::Claude,
+        &[CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID],
+        false,
+    );
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Claude),
+        vec![
+            "metric:extra-claude-routines".to_string(),
+            "metric:secondary".to_string(),
+        ]
+    );
+
+    settings.toggle_hidden_items(
+        ProviderId::Claude,
+        &[CLAUDE_DAILY_ROUTINES_USAGE_ITEM_ID],
+        true,
+    );
+    assert_eq!(
+        settings.hidden_usage_item_ids(ProviderId::Claude),
+        vec!["metric:secondary".to_string()]
+    );
 }

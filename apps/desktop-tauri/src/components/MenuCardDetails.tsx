@@ -2,7 +2,9 @@ import { useState } from "react";
 import type {
   CostSummaryDisplayStyle,
   DailyCostPoint,
+  ProviderDisplayDetail,
   PaceSnapshot,
+  ProviderInventoryItem,
   ProviderChartData,
   ProviderLocalUsageSummary,
   ProviderUsageSnapshot,
@@ -10,6 +12,7 @@ import type {
   SessionEquivalentForecastSnapshot,
 } from "../types/bridge";
 import { useLocale } from "../hooks/useLocale";
+import { providerAllowsPace } from "../lib/providerPace";
 import {
   useFormattedResetTime,
   type ResetTimeFormatMode,
@@ -18,6 +21,8 @@ import { formatEta } from "../lib/formatEta";
 import type { LocaleKey } from "../i18n/keys";
 import { paceCategory } from "../surfaces/tray/paceCategory";
 import { SimpleBarChart, StackedBarChart } from "./MiniBarChart";
+import { InventoryItemRow } from "./InventoryRows";
+import { QuotaWindowHistory } from "./QuotaWindowHistory";
 import { getPaceBudget, type PaceBudget } from "../lib/paceBudget";
 import PaceDetailsChart from "./PaceDetailsChart";
 
@@ -108,10 +113,12 @@ function LocalUsageBlock({
 }) {
   const { t } = useLocale();
   const isCodex = providerId === "codex";
-  const visibleHistory = costHistory
-    .slice(-30)
-    .filter((point) => point.value > 0);
-  const maxCost = Math.max(...visibleHistory.map((point) => point.value), 0);
+  const isMuse = providerId === "muse";
+  const visibleHistory = costHistory.slice(-30);
+  const maxCost = Math.max(
+    ...visibleHistory.flatMap((point) => (point.value == null ? [] : [point.value])),
+    0,
+  );
 
   return (
     <section className="menu-card__group menu-card__local-usage">
@@ -119,27 +126,35 @@ function LocalUsageBlock({
         <div>
           <span className="menu-card__local-label">{t("PanelToday")}</span>
           <strong>
-            {summary.todayCost != null
+            {isMuse
+              ? (summary.latestTokens != null
+                ? formatCompactCount(summary.latestTokens)
+                : "—")
+              : summary.todayCost != null
               ? formatCurrency(summary.todayCost, "USD")
               : "—"}
           </strong>
         </div>
-        <div>
-          <span className="menu-card__local-label">{t("PanelThirtyDayCost")}</span>
-          <strong>
-            {summary.thirtyDayCost != null
-              ? formatCurrency(summary.thirtyDayCost, "USD")
-              : "—"}
-          </strong>
-        </div>
+        {!isMuse && (
+          <div>
+            <span className="menu-card__local-label">{t("PanelThirtyDayCost")}</span>
+            <strong>
+              {summary.thirtyDayCost != null
+                ? formatCurrency(summary.thirtyDayCost, "USD")
+                : "—"}
+            </strong>
+          </div>
+        )}
         <div>
           <span className="menu-card__local-label">{t("PanelThirtyDayTokens")}</span>
           <strong>{formatCompactCount(summary.thirtyDayTokens)}</strong>
         </div>
-        <div>
-          <span className="menu-card__local-label">{t("PanelLatestTokens")}</span>
-          <strong>{formatCompactCount(summary.latestTokens)}</strong>
-        </div>
+        {!isMuse && (
+          <div>
+            <span className="menu-card__local-label">{t("PanelLatestTokens")}</span>
+            <strong>{formatCompactCount(summary.latestTokens)}</strong>
+          </div>
+        )}
       </div>
 
       {isCodex && visibleHistory.length > 0 && (
@@ -148,9 +163,10 @@ function LocalUsageBlock({
             <span
               key={`${point.date}-${index}`}
               style={{
-                height: `${Math.max(4, Math.round((point.value / maxCost) * 64))}px`,
+                height: `${point.value == null || maxCost <= 0 ? 1 : Math.max(4, Math.round((point.value / maxCost) * 64))}px`,
+                opacity: point.value == null ? 0 : undefined,
               }}
-              title={`${point.date}: ${formatCurrency(point.value, "USD")}`}
+              title={point.value == null ? point.date : `${point.date}: ${formatCurrency(point.value, "USD")}`}
             />
           ))}
         </div>
@@ -276,6 +292,7 @@ type MetricRowDisplay = {
   showResetWhenExhausted?: boolean;
   showPace?: boolean;
   showAsUsed?: boolean;
+  compactOverview?: boolean;
   costSummaryDisplayStyle?: CostSummaryDisplayStyle;
 };
 
@@ -283,7 +300,7 @@ type MetricRowDisplay = {
  * Single metric row inside the card — mirrors upstream `MetricRow`:
  *   • title (body / medium)
  *   • UsageProgressBar (capsule, 6pt)
- *   • HStack: "N% used"  ··  reset countdown (right-aligned, secondary)
+ *   • HStack: "N% used"  · ·  reset countdown (right-aligned, secondary)
  */
 function MetricRow({
   title,
@@ -310,6 +327,7 @@ function MetricRow({
     showResetWhenExhausted = false,
     showPace = true,
     showAsUsed = false,
+    compactOverview = false,
   } = display;
   const isInformational = snap.isInformational === true;
   const usedPct = Number.isFinite(snap.usedPercent) ? Math.max(0, snap.usedPercent) : 0;
@@ -352,20 +370,20 @@ function MetricRow({
               ? resetText
               : `${Math.round(displayPct)}% ${displayLabel}`}
         </span>
-        {isInformational &&
+        {!compactOverview && isInformational &&
           snap.resetDescription?.trim() &&
           resetText &&
           resetText !== infoPrimary && (
             <span className="menu-metric__reset">{resetText}</span>
           )}
-        {!isInformational && resetText && !replacesPercent && (
+        {!compactOverview && !isInformational && resetText && !replacesPercent && (
           <span className="menu-metric__reset">{resetText}</span>
         )}
       </div>
-      {!isInformational && snap.isExhausted && (
+      {!compactOverview && !isInformational && snap.isExhausted && (
         <div className="menu-metric__exhausted">{exhaustedLabel}</div>
       )}
-      {!isInformational && paceView.kind === "budget" && (
+      {!compactOverview && !isInformational && paceView.kind === "budget" && (
         <div className="menu-metric__budget">
           <button
             type="button"
@@ -391,7 +409,7 @@ function MetricRow({
           {expanded && <PaceDetailsChart snap={snap} t={t} />}
         </div>
       )}
-      {!isInformational && paceView.kind === "reserve" && (
+      {!compactOverview && !isInformational && paceView.kind === "reserve" && (
         <div className="menu-metric__row menu-metric__reserve">
           <span className="menu-metric__pct">{Math.round(paceView.percent)}% {t("PanelReserveSuffix")}</span>
           {reserveDescription && (
@@ -399,7 +417,7 @@ function MetricRow({
           )}
         </div>
       )}
-      {showPace && !isInformational && forecastText && (
+      {!compactOverview && showPace && !isInformational && forecastText && (
         <div className="menu-metric__row menu-metric__forecast">
           <span className="menu-metric__pct">{forecastText}</span>
         </div>
@@ -410,12 +428,15 @@ function MetricRow({
 
 export interface MenuCardPresence {
   hasMetrics: boolean;
+  hasInventory: boolean;
+  hasDisplayDetails: boolean;
   hasCost: boolean;
   hasPace: boolean;
   hasCharts: boolean;
   hasCostHistory: boolean;
   hasCreditsHistory: boolean;
   hasUsageBreakdown: boolean;
+  hasQuotaWindowHistory: boolean;
   localUsage: ProviderChartData["localUsage"] | null;
   wayfinderUsage: ProviderUsageSnapshot["wayfinderUsage"] | null;
   hasDetails: boolean;
@@ -441,31 +462,56 @@ export function describeCard(
   visibleMetrics: MetricEntry[],
   costSummaryDisplayStyle: CostSummaryDisplayStyle = "detailed",
   showPace = true,
+  compactOverview = false,
 ): MenuCardPresence {
   const hasCostHistory =
-    chartData !== null && chartData.costHistory.some((point) => point.value > 0);
+    chartData !== null && chartData.costHistory.some((point) => point.value != null);
   const hasCreditsHistory =
     chartData !== null && chartData.creditsHistory.length > 0;
   const hasUsageBreakdown =
     chartData !== null && chartData.usageBreakdown.length > 0;
-  const hasCharts = hasCostHistory || hasCreditsHistory || hasUsageBreakdown;
+  const hasQuotaWindowHistory =
+    chartData !== null && (chartData.quotaWindowHistory?.windows.length ?? 0) > 0;
+  const hasCharts =
+    hasCostHistory || hasCreditsHistory || hasUsageBreakdown || hasQuotaWindowHistory;
   const isWayfinder = provider.providerId === "wayfinder";
   const localUsage = provider.error ? null : chartData?.localUsage ?? null;
   const wayfinderUsage = isWayfinder ? provider.wayfinderUsage : null;
   const hasMetrics = visibleMetrics.length > 0;
-  const hasCost = !!provider.cost && costSummaryDisplayStyle !== "hidden";
-  const hasPace = showPace && !!provider.pace;
+  const hasInventory = !provider.error && (provider.inventory?.length ?? 0) > 0;
+  const hasDisplayDetails = !provider.error && (provider.displayDetails?.length ?? 0) > 0;
+  const hasCost =
+    !!provider.cost &&
+    (costSummaryDisplayStyle !== "hidden" || provider.cost.alwaysVisible === true);
+  const hasPace =
+    showPace &&
+    providerAllowsPace(provider.providerId, provider.sourceLabel) &&
+    !!provider.pace;
   const hasDetails =
     !provider.error &&
-    (hasMetrics || hasCost || hasPace || hasCharts || !!localUsage || !!wayfinderUsage);
+    (hasMetrics ||
+      hasInventory ||
+      hasDisplayDetails ||
+      hasCost ||
+      hasPace ||
+      hasCharts ||
+      !!localUsage ||
+      !!wayfinderUsage) &&
+    // Compact Overview suppresses supplemental sections entirely; a card
+    // whose only content would be suppressed renders header-only so no empty
+    // divider or details container appears.
+    (!compactOverview || hasMetrics || !!wayfinderUsage || hasPace);
   return {
     hasMetrics,
+    hasInventory,
+    hasDisplayDetails,
     hasCost,
     hasPace,
     hasCharts,
     hasCostHistory,
     hasCreditsHistory,
     hasUsageBreakdown,
+    hasQuotaWindowHistory,
     localUsage,
     wayfinderUsage,
     hasDetails,
@@ -482,6 +528,11 @@ export default function MenuCardDetails({
   onLayoutChange,
 }: MenuCardDetailsProps) {
   const { t } = useLocale();
+  const paceEnabled =
+    display.showPace !== false &&
+    providerAllowsPace(provider.providerId, provider.sourceLabel);
+  const metricDisplay = paceEnabled ? display : { ...display, showPace: false };
+  const compactOverview = display.compactOverview === true;
   const [expandedPaceWindow, setExpandedPaceWindow] = useState<string | null>(null);
   const formattedCostReset = useFormattedResetTime(
     provider.cost?.resetsAt ?? null,
@@ -493,12 +544,15 @@ export default function MenuCardDetails({
 
   const {
     hasMetrics,
+    hasInventory,
+    hasDisplayDetails,
     hasCost,
     hasPace,
     hasCharts,
     hasCostHistory,
     hasCreditsHistory,
     hasUsageBreakdown,
+    hasQuotaWindowHistory,
     localUsage,
     wayfinderUsage,
   } = presence;
@@ -513,7 +567,7 @@ export default function MenuCardDetails({
               title={m.label}
               snap={m.snap}
               exhaustedLabel={t("DetailWindowExhausted")}
-              display={display}
+              display={metricDisplay}
               expanded={expandedPaceWindow === m.id}
               resetFormatMode={m.resetFormatMode}
               sessionEquivalentForecast={m.sessionEquivalentForecast}
@@ -528,15 +582,46 @@ export default function MenuCardDetails({
         </section>
       )}
 
-      {wayfinderUsage && <WayfinderUsageBlock usage={wayfinderUsage} />}
+      {!provider.error && hasInventory && (
+        <section className="menu-card__group menu-card__inventory">
+          {provider.inventory?.map((item) => (
+            <InventoryItemRow
+              key={item.id}
+              item={item}
+              resetTimeRelative={display.resetTimeRelative}
+              lineClassName="menu-card__cost-line"
+              expiryClassName="menu-card__cost-line--muted"
+            />
+          ))}
+        </section>
+      )}
+      {!provider.error && hasDisplayDetails && !compactOverview && (
+        <section className="menu-card__group menu-card__provider-details">
+          {provider.displayDetails?.map((detail, index) => (
+            <DisplayDetailRow key={`${detail.id}-${index}`} detail={detail} />
+          ))}
+        </section>
+      )}
 
-      {hasMetrics && hasCost && costStyle !== "hidden" && <div className="menu-card__divider" />}
+      {!provider.error && hasDisplayDetails && (
+        <section className="menu-card__group menu-card__provider-details">
+          {provider.displayDetails?.map((detail, index) => (
+            <DisplayDetailRow key={`${detail.id}-${index}`} detail={detail} />
+          ))}
+        </section>
+      )}
 
-      {provider.cost && costStyle !== "hidden" && (
+      {wayfinderUsage && !compactOverview && <WayfinderUsageBlock usage={wayfinderUsage} />}
+
+      {!compactOverview && hasMetrics && hasCost && <div className="menu-card__divider" />}
+
+      {!compactOverview && hasCost && provider.cost && (
         <section className="menu-card__group menu-card__cost">
           <div className="menu-card__group-title">
-            {provider.cost.balance != null && provider.cost.limit == null
-              ? provider.cost.period || t("CreditsLabel")
+            {provider.cost.alwaysVisible === true && (provider.cost.limit ?? 0) <= 0
+              ? t("ApiSpendTitle")
+              : provider.cost.balance != null && provider.cost.limit == null
+                ? provider.cost.period || t("CreditsLabel")
               : `${t("DetailCostTitle")} — ${provider.cost.period}`}
           </div>
           {provider.cost.balance != null && provider.cost.limit == null ? (
@@ -604,7 +689,7 @@ export default function MenuCardDetails({
         </section>
       )}
 
-      {(localUsage || hasPace || hasCharts) && (
+      {!compactOverview && (localUsage || hasPace || hasCharts) && (
         <details className="menu-card__more" onToggle={onLayoutChange}>
           <summary>{t("PanelUsageDetails")}</summary>
           <div className="menu-card__more-content">
@@ -616,7 +701,7 @@ export default function MenuCardDetails({
               />
             )}
 
-            {hasPace && provider.pace && (
+            {paceEnabled && hasPace && provider.pace && (
               <section className="menu-card__group menu-card__pace">
                 <div className="menu-card__pace-header">
                   <span className="menu-card__group-title">{t("DetailPaceTitle")}</span>
@@ -690,10 +775,36 @@ export default function MenuCardDetails({
                     t={t}
                   />
                 )}
+                {hasQuotaWindowHistory && (
+                  <QuotaWindowHistory history={chartData!.quotaWindowHistory} t={t} />
+                )}
               </section>
             )}
           </div>
         </details>
+      )}
+    </div>
+  );
+}
+
+function DisplayDetailRow({ detail }: { detail: ProviderDisplayDetail }) {
+  const progress = detail.progress;
+  const progressPercent = progress && Number.isFinite(progress.used) && Number.isFinite(progress.total) && progress.total > 0
+    ? Math.max(0, Math.min(100, (progress.used / progress.total) * 100))
+    : null;
+
+  return (
+    <div className="menu-card__provider-detail">
+      <div className="menu-card__cost-line">
+        <span>{detail.title}: {detail.value}</span>
+        {detail.secondaryValue && (
+          <span className="menu-card__cost-line--muted">{detail.secondaryValue}</span>
+        )}
+      </div>
+      {progressPercent != null && (
+        <div className="menu-metric__bar" aria-label={`${detail.title} progress`}>
+          <div className="menu-metric__bar-fill" style={{ width: `${progressPercent}%` }} />
+        </div>
       )}
     </div>
   );

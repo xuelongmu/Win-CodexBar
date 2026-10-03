@@ -122,11 +122,18 @@ pub struct AppState {
     pub provider_cache: Vec<ProviderUsageSnapshot>,
     pub transient_provider_failure_counts: HashMap<ProviderId, u8>,
     pub provider_cache_updated_at: Option<std::time::Instant>,
+    /// Per-provider freshness for scoped background refreshes. The aggregate
+    /// timestamp cannot tell a dedicated auto-resume watcher whether its own
+    /// provider was refreshed recently.
+    pub provider_cache_updated_at_by_provider: HashMap<ProviderId, std::time::Instant>,
     pub provider_refresh_started_at: Option<std::time::Instant>,
     /// Monotonic generation for in-flight provider fetches. Bumped when a new
     /// refresh starts or enablement changes so superseded results are ignored.
     pub provider_refresh_generation: u64,
     pub is_refreshing: bool,
+    /// Authoritative Claude account reconciliation state for mounted and
+    /// newly-mounted frontend surfaces.
+    pub claude_reconciliation: crate::commands::claude_reconciliation::ClaudeReconciliationState,
     pub update_state: UpdateState,
     /// Full update metadata from the last successful check.
     pub update_info: Option<codexbar::updater::UpdateInfo>,
@@ -155,6 +162,8 @@ pub struct AppState {
     /// `began` lets a genuine refocus clear the guard early once the
     /// gesture's own focus flicker has settled.
     pub gesture_blur_guard: Option<(std::time::Instant, std::time::Instant)>,
+    /// Opt-in exact-session resume arms; intentionally discarded on restart.
+    pub auto_resume: crate::auto_resume::AutoResumeState,
 }
 
 impl Default for AppState {
@@ -185,9 +194,11 @@ impl AppState {
             provider_cache: Vec::new(),
             transient_provider_failure_counts: HashMap::new(),
             provider_cache_updated_at: None,
+            provider_cache_updated_at_by_provider: HashMap::new(),
             provider_refresh_started_at: None,
             provider_refresh_generation: 0,
             is_refreshing: false,
+            claude_reconciliation: Default::default(),
             update_state: UpdateState::Idle,
             update_info: None,
             last_update_check_ms: None,
@@ -199,6 +210,7 @@ impl AppState {
             startup_tray_blur_grace_until: None,
             flyout_reveal_pending: false,
             gesture_blur_guard: None,
+            auto_resume: crate::auto_resume::AutoResumeState::default(),
         }
     }
 
