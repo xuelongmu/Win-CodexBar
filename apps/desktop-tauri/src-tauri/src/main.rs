@@ -194,6 +194,7 @@ fn main() {
             commands::claude_account_remove,
             commands::claude_account_switch,
             commands::grok_accounts_list,
+            commands::get_grok_accounts_state,
             commands::grok_account_add,
             commands::grok_account_cancel_login,
             commands::grok_account_save_current,

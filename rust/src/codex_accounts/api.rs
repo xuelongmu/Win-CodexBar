@@ -36,6 +36,8 @@ const UNAUTHORIZED_MESSAGE: &str = "The Codex usage API request returned unautho
 #[derive(Debug, Error)]
 pub enum CodexApiError {
     #[error("{0}")]
+    Authentication(String),
+    #[error("{0}")]
     Message(String),
     #[error("network error: {0}")]
     Network(String),
@@ -121,7 +123,7 @@ impl CodexAccountApi {
                 verify_live_data,
             )
             .await;
-        if !matches!(&result, Err(CodexApiError::Message(msg)) if msg == UNAUTHORIZED_MESSAGE)
+        if !matches!(&result, Err(CodexApiError::Authentication(_)))
             || credentials.refresh_token.is_empty()
         {
             return result;
@@ -336,7 +338,9 @@ impl CodexAccountApi {
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return Err(CodexApiError::Message(UNAUTHORIZED_MESSAGE.to_string()));
+                return Err(CodexApiError::Authentication(
+                    UNAUTHORIZED_MESSAGE.to_string(),
+                ));
             }
             let body = response.text().await.unwrap_or_default().trim().to_string();
             let msg = if body.is_empty() {
@@ -396,7 +400,7 @@ impl CodexAccountApi {
             } else {
                 "The refresh token has expired. Sign in again for this account."
             };
-            return Err(CodexApiError::Message(message.to_string()));
+            return Err(CodexApiError::Authentication(message.to_string()));
         }
         if !response.status().is_success() {
             return Err(CodexApiError::Message(

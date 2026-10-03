@@ -28,6 +28,8 @@ pub struct ClaudeAccountUsage {
 pub struct ClaudeAccountUsageState {
     pub usage: Option<ClaudeAccountUsage>,
     pub usage_error: Option<String>,
+    #[serde(default)]
+    pub needs_authentication: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,7 +66,7 @@ pub fn get_claude_accounts_state(
             if !codexbar::settings::Settings::load().claude_allow_reading_claude_code_credentials {
                 usage = ClaudeAccountUsageState { usage: None, usage_error: Some(
                     "Enable Allow reading Claude Code's credentials in Settings to check saved accounts.".into()
-                ) };
+                ), needs_authentication: false };
             }
             ClaudeAccountState { account, usage }
         })
@@ -90,18 +92,19 @@ fn update_usage(
                 updated_at: usage.updated_at.to_rfc3339(),
             });
             previous.usage_error = None;
+            previous.needs_authentication = false;
         }
         Err(error) => {
+            previous.needs_authentication = matches!(
+                error,
+                ProviderError::OAuthRevoked(_)
+                    | ProviderError::OAuthExpired(_)
+                    | ProviderError::AuthRequired
+                    | ProviderError::NoCookies
+            );
             // Never expose response bodies or credentials through this bridge.
             previous.usage_error = Some(
-                if matches!(
-                    error,
-                    ProviderError::OAuthRevoked(_)
-                        | ProviderError::OAuthExpired(_)
-                        | ProviderError::AuthRequired
-                        | ProviderError::NoCookies
-                        | ProviderError::NotInstalled(_)
-                ) {
+                if previous.needs_authentication {
                     "Sign in again to check this Claude account."
                 } else {
                     "Claude usage check failed. Will retry automatically."
@@ -191,6 +194,7 @@ mod tests {
             Err(ProviderError::OAuth("API error 500".into())),
         );
         assert!(!state.usage_error.unwrap().contains("Sign in"));
+        assert!(!state.needs_authentication);
     }
 
     #[test]
@@ -214,8 +218,10 @@ mod tests {
             23.0
         );
         assert!(state.usage_error.as_ref().unwrap().contains("Sign in"));
+        assert!(state.needs_authentication);
         update_usage(&mut state, Ok(usage));
         assert!(state.usage_error.is_none());
+        assert!(!state.needs_authentication);
     }
 
     #[test]

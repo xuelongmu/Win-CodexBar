@@ -90,9 +90,10 @@ describe("CodexAccountsMenu", () => {
     renderMenu(false, {
       accounts: [account("1", { source: "ambient" })],
       accountOrdinals: { "1": 1 }, snapshots: {},
+      needsAuthentication: { "1": true },
     });
     expect(await screen.findByRole("button", { name: "CodexAccountsAddButton" })).toBeDefined();
-    const refresh = await screen.findByRole("button", { name: "CodexAccountsReauthenticateButton" });
+    const refresh = await screen.findByRole("button", { name: "CodexAccountsReauthenticateButton: user-1@example.com" });
     await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
     await act(async () => { refresh.click(); });
     expect(tauriMocks.codexAccountReauthenticate).toHaveBeenCalledOnce();
@@ -120,7 +121,7 @@ describe("CodexAccountsMenu", () => {
   });
 
   it("reauthenticates a single saved account without switching it and reports cancellation", async () => {
-    renderMenu(false, { accounts: [account("expired")], accountOrdinals: { expired: 1 }, snapshots: {} });
+    renderMenu(false, { accounts: [account("expired")], accountOrdinals: { expired: 1 }, snapshots: {}, needsAuthentication: { expired: true } });
     const refresh = await screen.findByRole("button", {
       name: "CodexAccountsReauthenticateButton: user-expired@example.com",
     });
@@ -144,6 +145,7 @@ describe("CodexAccountsMenu", () => {
     expect(screen.getByText("35% PanelLeftSuffix")).toBeDefined();
     expect(screen.getByText("7d")).toBeDefined();
     expect(screen.getByText("30% PanelLeftSuffix")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
   });
 
   it("keeps login actions disabled while account updates arrive during sign-in", async () => {

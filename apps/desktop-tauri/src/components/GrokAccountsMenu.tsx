@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { GrokAccount, GrokAccountUsage } from "../types/bridge";
-import { grokAccountAdd, grokAccountCancelLogin, grokAccountSwitch } from "../lib/tauri";
+import { grokAccountAdd, grokAccountReauthenticate, grokAccountCancelLogin, grokAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
 import { useFormattedResetTime } from "../hooks/useFormattedResetTime";
 import { useGrokAccounts } from "../hooks/useGrokAccounts";
@@ -29,10 +29,10 @@ export default function GrokAccountsMenu({
     await run(() => grokAccountSwitch(id), () => setSwitched(true));
   };
 
-  const addAccount = () => {
+  const addAccount = (id?: string) => {
     setSwitched(false);
     setSigningIn(true);
-    void run(grokAccountAdd, undefined, () => setSigningIn(false));
+    void run(id ? () => grokAccountReauthenticate(id) : grokAccountAdd, undefined, () => setSigningIn(false));
   };
   return (
     <ProviderAccountsMenu
@@ -41,7 +41,7 @@ export default function GrokAccountsMenu({
       aria-busy={busy}
       onLayoutChange={onLayoutChange}
       actions={<>
-        <button type="button" className="codex-menu-accounts__action" disabled={busy} onClick={addAccount}>
+        <button type="button" className="codex-menu-accounts__action" disabled={busy} onClick={() => addAccount()}>
           {t("CodexAccountsAddButton")}
         </button>
         {signingIn && <button type="button" className="codex-menu-accounts__action" onClick={() => void grokAccountCancelLogin().catch(reportError)}>
@@ -66,6 +66,7 @@ export default function GrokAccountsMenu({
             resetTimeRelative={resetTimeRelative}
             busy={busy}
             onSwitch={switchAccount}
+            onReauthenticate={addAccount}
           />
         ))}
       </ul>
@@ -80,6 +81,7 @@ function GrokAccountRow({
   resetTimeRelative,
   busy,
   onSwitch,
+  onReauthenticate,
 }: {
   account: GrokAccount;
   snapshot: GrokAccountUsage | undefined;
@@ -87,6 +89,7 @@ function GrokAccountRow({
   resetTimeRelative: boolean;
   busy: boolean;
   onSwitch: (id: string) => Promise<void>;
+  onReauthenticate: (id: string) => void;
 }) {
   const { t } = useLocale();
   const email = hideEmail ? maskEmail(account.email) : account.email;
@@ -138,15 +141,29 @@ function GrokAccountRow({
               />
             </span>
           )}
+          {snapshot?.usageError && <span className="codex-menu-accounts__error" role="status">{snapshot.usageError}</span>}
         </div>
-        <button
-          type="button"
-          className="codex-menu-accounts__switch"
-          disabled={busy || account.isActive || !account.isSaved}
-          onClick={() => void onSwitch(account.id)}
-        >
-          {t("CodexAccountsSwitchButton")}
-        </button>
+        <div className="codex-menu-accounts__row-actions">
+          {snapshot?.needsAuthentication && (
+            <button
+              type="button"
+              className="codex-menu-accounts__switch"
+              disabled={busy}
+              aria-label={`${t("CodexAccountsReauthenticateButton")}: ${email}`}
+              onClick={() => onReauthenticate(account.id)}
+            >
+              {t("CodexAccountsReauthenticateButton")}
+            </button>
+          )}
+          <button
+            type="button"
+            className="codex-menu-accounts__switch"
+            disabled={busy || account.isActive || !account.isSaved}
+            onClick={() => void onSwitch(account.id)}
+          >
+            {t("CodexAccountsSwitchButton")}
+          </button>
+        </div>
       </div>
     </li>
   );

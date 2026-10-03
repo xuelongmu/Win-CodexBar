@@ -275,6 +275,18 @@ pub fn seed_claude_accounts_from_env() -> Option<Vec<crate::commands::ClaudeAcco
     result
 }
 
+/// Credential-free Grok account fixtures, used only by proof-mode commands.
+pub fn seed_grok_accounts_from_env() -> Option<Vec<crate::commands::GrokAccountProof>> {
+    let path = std::env::var_os("CODEXBAR_SEED_GROK_ACCOUNTS_JSON")?;
+    let result = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    if result.is_none() {
+        tracing::warn!("Invalid Grok account proof seed; using real account metadata");
+    }
+    result
+}
+
 /// Whether a seed path was configured at launch. While set, the provider
 /// cache is pinned fresh so the synthetic snapshot is never evicted by an
 /// automatic refresh during a proof/capture run.

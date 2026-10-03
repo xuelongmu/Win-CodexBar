@@ -5,6 +5,7 @@ import type { GrokAccount } from "../../../../../types/bridge";
 const mocks = vi.hoisted(() => ({
   grokAccountsList: vi.fn(),
   grokAccountAdd: vi.fn(),
+  grokAccountReauthenticate: vi.fn(),
   grokAccountCancelLogin: vi.fn(),
   grokAccountSaveCurrent: vi.fn(),
   grokAccountRemove: vi.fn(),
@@ -36,6 +37,18 @@ const other: GrokAccount = {
 };
 
 describe("GrokAccountsSection", () => {
+  it("offers targeted reauthentication only for the expired account", async () => {
+    mocks.grokAccountFetch.mockImplementation(async (id: string) => ({ usageAvailable: false, needsAuthentication: id === other.id }));
+    mocks.grokAccountReauthenticate.mockResolvedValue(undefined);
+    render(<GrokAccountsSection t={t} />);
+    const refresh = await screen.findByRole("button", { name: `CodexAccountsReauthenticateButton: ${other.email}` });
+    expect(screen.getAllByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toHaveLength(1);
+    mocks.grokAccountFetch.mockResolvedValue({ usageAvailable: true, needsAuthentication: false });
+    await act(async () => fireEvent.click(refresh));
+    expect(mocks.grokAccountReauthenticate).toHaveBeenCalledWith(other.id);
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
+    expect(mocks.grokAccountSwitch).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.resetAllMocks();
     events.listen.mockResolvedValue(() => {});

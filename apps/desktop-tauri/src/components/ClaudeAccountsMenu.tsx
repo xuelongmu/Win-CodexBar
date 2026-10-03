@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { ClaudeAccount } from "../types/bridge";
-import { claudeAccountsList, claudeAccountAdd, claudeAccountCancelLogin, claudeAccountSwitch } from "../lib/tauri";
+import { claudeAccountsList, claudeAccountAdd, claudeAccountReauthenticate, claudeAccountCancelLogin, claudeAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
 import ClaudeAccountUsage from "./ClaudeAccountUsage";
 import ProviderAccountsMenu from "./ProviderAccountsMenu";
@@ -98,12 +98,12 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
     }
   };
 
-  const addAccount = async () => {
+  const addAccount = async (id?: string) => {
     setSigningIn(true);
     setError(null);
     setSwitched(false);
     try {
-      await claudeAccountAdd();
+      await (id ? claudeAccountReauthenticate(id) : claudeAccountAdd());
       await load();
     } catch (e) {
       if (mounted.current) setError(String(e));
@@ -152,14 +152,27 @@ export default function ClaudeAccountsMenu({ hideEmail, onLayoutChange, showAsUs
                   )}
                   <ClaudeAccountUsage account={account} t={t} showAsUsed={showAsUsed} resetTimeRelative={resetTimeRelative} />
                 </div>
-                <button
-                  type="button"
-                  className="codex-menu-accounts__switch"
-                  disabled={busy || account.isActive || !account.isSaved}
-                  onClick={() => void switchAccount(account.id)}
-                >
-                  {t("CodexAccountsSwitchButton")}
-                </button>
+                <div className="codex-menu-accounts__row-actions">
+                  {account.needsAuthentication && (
+                    <button
+                      type="button"
+                      className="codex-menu-accounts__switch"
+                      disabled={busy}
+                      aria-label={`${t("CodexAccountsReauthenticateButton")}: ${privateLabel.label}`}
+                      onClick={() => void addAccount(account.id)}
+                    >
+                      {t("CodexAccountsReauthenticateButton")}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="codex-menu-accounts__switch"
+                    disabled={busy || account.isActive || !account.isSaved}
+                    onClick={() => void switchAccount(account.id)}
+                  >
+                    {t("CodexAccountsSwitchButton")}
+                  </button>
+                </div>
               </div>
             </li>
           );

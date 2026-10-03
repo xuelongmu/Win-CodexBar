@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   grokAccountsList: vi.fn(),
   grokAccountSwitch: vi.fn(),
   grokAccountAdd: vi.fn(),
+  grokAccountReauthenticate: vi.fn(),
   grokAccountCancelLogin: vi.fn(),
   grokAccountFetch: vi.fn(),
 }));
@@ -54,6 +55,21 @@ describe("GrokAccountsMenu", () => {
     expect(bars).toHaveLength(2);
     expect((bars[0] as HTMLElement).style.width).toBe("38%");
     expect((bars[1] as HTMLElement).style.width).toBe("100%");
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
+  });
+
+  it("offers targeted login only for an authentication failure and hides it after recovery", async () => {
+    mocks.grokAccountFetch.mockImplementation(async (id: string) => ({ usageAvailable: false, usedPercent: null, plan: null, windowMinutes: null, resetsAt: null, needsAuthentication: id === second.id, usageError: "Usage unavailable." }));
+    mocks.grokAccountReauthenticate.mockResolvedValue(undefined);
+    render(<GrokAccountsMenu hideEmail={false} resetTimeRelative />);
+    const refresh = await screen.findByRole("button", { name: `CodexAccountsReauthenticateButton: ${second.email}` });
+    expect(screen.getAllByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toHaveLength(1);
+    mocks.grokAccountFetch.mockResolvedValue({ usageAvailable: true, usedPercent: 42, plan: null, windowMinutes: null, resetsAt: null, needsAuthentication: false });
+    await act(async () => fireEvent.click(refresh));
+    expect(mocks.grokAccountReauthenticate).toHaveBeenCalledWith(second.id);
+    expect(mocks.grokAccountSwitch).not.toHaveBeenCalled();
+    expect(mocks.grokAccountAdd).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
   });
 
   it("omits percentage and bar when usage is unavailable", async () => {

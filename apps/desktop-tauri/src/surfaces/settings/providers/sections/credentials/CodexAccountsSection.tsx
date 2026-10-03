@@ -41,6 +41,7 @@ export function CodexAccountsSection({ t, hidePersonalInfo = false }: Props) {
   >({});
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [accountOrdinals, setAccountOrdinals] = useState<Record<string, number>>({});
+  const [accountNeedsAuthentication, setAccountNeedsAuthentication] = useState<Record<string, boolean>>({});
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +58,7 @@ export function CodexAccountsSection({ t, hidePersonalInfo = false }: Props) {
       setDisplayNames(next.displayNames ?? {});
       setAccountOrdinals(next.accountOrdinals);
       setSnapshots(next.snapshots);
+      setAccountNeedsAuthentication(next.needsAuthentication ?? {});
       setLoaded(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -254,14 +256,14 @@ export function CodexAccountsSection({ t, hidePersonalInfo = false }: Props) {
                       </span>
                     </div>
                     <div className="credential-card__actions">
-                      <button
+                      {accountNeedsAuthentication[account.id] && <button
                         type="button"
                         className="credential-btn credential-btn--secondary"
                         disabled={busy}
                         onClick={() => void handleReauthenticate(account.id)}
                       >
                         {t("CodexAccountsReauthenticateButton")}
-                      </button>
+                      </button>}
                       <button
                         type="button"
                         className="credential-btn credential-btn--secondary"

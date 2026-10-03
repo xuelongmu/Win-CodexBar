@@ -38,6 +38,7 @@ export default function CodexAccountsMenu({
   >({});
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [accountOrdinals, setAccountOrdinals] = useState<Record<string, number>>({});
+  const [accountNeedsAuthentication, setAccountNeedsAuthentication] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
@@ -53,6 +54,7 @@ export default function CodexAccountsMenu({
       setDisplayNames(next.displayNames ?? {});
       setAccountOrdinals(next.accountOrdinals);
       setSnapshots(next.snapshots);
+      setAccountNeedsAuthentication(next.needsAuthentication ?? {});
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -121,16 +123,6 @@ export default function CodexAccountsMenu({
         >
           {t(needsAuthentication && !ambient ? "CodexAccountsSignInButton" : "CodexAccountsAddButton")}
         </button>
-        {ambient && (
-          <button
-            type="button"
-            className="codex-menu-accounts__action"
-            disabled={busy}
-            onClick={() => void run(() => codexAccountReauthenticate(), true)}
-          >
-            {t("CodexAccountsReauthenticateButton")}
-          </button>
-        )}
       </>}
     >
 
@@ -158,6 +150,7 @@ export default function CodexAccountsMenu({
                 showAsUsed={showAsUsed}
                 resetTimeRelative={resetTimeRelative}
                 busy={busy}
+                needsAuthentication={accountNeedsAuthentication[account.id] ?? (account.source === "ambient" && needsAuthentication)}
                 onSwitch={handleSwitch}
                 onReauthenticate={(id) => run(() => codexAccountReauthenticate(id), true)}
               />
@@ -177,6 +170,7 @@ function CodexAccountRow({
   showAsUsed,
   resetTimeRelative,
   busy,
+  needsAuthentication,
   onSwitch,
   onReauthenticate,
 }: {
@@ -187,6 +181,7 @@ function CodexAccountRow({
   showAsUsed: boolean;
   resetTimeRelative: boolean;
   busy: boolean;
+  needsAuthentication: boolean;
   onSwitch: (id: string) => Promise<void>;
   onReauthenticate: (id: string) => Promise<void>;
 }) {
@@ -221,7 +216,7 @@ function CodexAccountRow({
           )}
         </div>
         <div className="codex-menu-accounts__row-actions">
-          {!isAmbient && (
+          {needsAuthentication && (
             <button
               type="button"
               className="codex-menu-accounts__switch"

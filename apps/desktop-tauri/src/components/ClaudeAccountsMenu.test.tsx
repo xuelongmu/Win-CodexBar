@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
   return {
     claudeAccountsList: vi.fn(),
     claudeAccountAdd: vi.fn(),
+    claudeAccountReauthenticate: vi.fn(),
     claudeAccountCancelLogin: vi.fn(),
     claudeAccountSwitch: vi.fn(),
     claudeReconciliationState: vi.fn(),
@@ -30,6 +31,26 @@ const reconciliation = (generation: number, status: "pending" | "succeeded" | "f
 });
 
 describe("ClaudeAccountsMenu", () => {
+  it("shows Refresh login only for the expired account and removes it after recovery", async () => {
+    mocks.claudeAccountsList.mockResolvedValue([first, { ...second, needsAuthentication: true, usageError: "Sign in again." }]);
+    mocks.claudeAccountReauthenticate.mockResolvedValue(undefined);
+    render(<ClaudeAccountsMenu hideEmail={false} />);
+    const refresh = await screen.findByRole("button", { name: `CodexAccountsReauthenticateButton: ${second.email}` });
+    expect(screen.getAllByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toHaveLength(1);
+    mocks.claudeAccountsList.mockResolvedValue([first, second]);
+    await act(async () => fireEvent.click(refresh));
+    expect(mocks.claudeAccountReauthenticate).toHaveBeenCalledWith(second.id);
+    expect(mocks.claudeAccountAdd).not.toHaveBeenCalled();
+    expect(mocks.claudeAccountSwitch).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
+  });
+
+  it("does not suggest login for a temporary usage error", async () => {
+    mocks.claudeAccountsList.mockResolvedValue([{ ...first, usageError: "Will retry automatically.", needsAuthentication: false }]);
+    render(<ClaudeAccountsMenu hideEmail={false} />);
+    await screen.findByText(first.email);
+    expect(screen.queryByRole("button", { name: /CodexAccountsReauthenticateButton/ })).toBeNull();
+  });
   it("renders per-account usage and reloads it after background checks", async () => {
     const usage = (used: number) => ({ fiveHour: { usedPercent: used, resetsAt: null }, sevenDay: null, updatedAt: "2026-10-03T12:00:00Z" });
     mocks.claudeAccountsList.mockResolvedValue([{ ...first, usage: usage(11) }, { ...second, usage: usage(63) }]);

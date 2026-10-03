@@ -137,14 +137,10 @@ pub(crate) async fn refresh_codex_account_lanes(
             )
             .await
             {
-                Ok(Ok(snapshot)) => Some((account, snapshot)),
+                Ok(Ok(snapshot)) => Some((account, Ok(snapshot))),
                 Ok(Err(e)) => {
-                    tracing::debug!(
-                        "codex account lane {} failed: {}",
-                        account.id,
-                        into_api_message(e)
-                    );
-                    None
+                    tracing::debug!("codex account lane {} failed: {}", account.id, e);
+                    Some((account, Err(e)))
                 }
                 Err(_) => {
                     tracing::debug!("codex account lane {} timed out", account.id);
@@ -155,21 +151,55 @@ pub(crate) async fn refresh_codex_account_lanes(
     }
 
     let mut updates = Vec::new();
+    let mut authentication = Vec::new();
     for handle in handles {
-        if let Ok(Some((fetched_account, snapshot))) = handle.await {
-            updates.push((fetched_account, snapshot));
+        if let Ok(Some((fetched_account, result))) = handle.await {
+            authentication.push((
+                fetched_account.clone(),
+                matches!(&result, Err(CodexApiError::Authentication(_))),
+            ));
+            if let Ok(snapshot) = result {
+                updates.push((fetched_account, snapshot));
+            }
         }
     }
     // Hold the generation owner through the read/merge/write so an invalidated
     // batch cannot overwrite a replacement batch's account snapshots.
     let state = app.state::<Mutex<AppState>>();
-    let Ok(state) = state.lock() else { return };
+    let Ok(mut state) = state.lock() else { return };
     match save_codex_lane_results(&state, generation, updates) {
         Ok(false) => return,
         Err(e) => tracing::warn!("codex account lanes: failed to persist snapshots: {e}"),
         Ok(true) => {}
     }
+    if let Ok(live_accounts) = load_codex_accounts() {
+        publish_codex_authentication(&mut state, generation, &live_accounts, authentication);
+    }
     events::emit_codex_accounts_updated(&app);
+}
+
+fn publish_codex_authentication(
+    state: &mut AppState,
+    generation: u64,
+    live_accounts: &[CodexAccount],
+    results: Vec<(CodexAccount, bool)>,
+) {
+    if !is_current_provider_refresh_generation(state, generation) {
+        return;
+    }
+    state
+        .codex_account_needs_authentication
+        .retain(|id, _| live_accounts.iter().any(|account| account.id == *id));
+    for (fetched, needs_authentication) in results {
+        if live_accounts
+            .iter()
+            .any(|live| live.id == fetched.id && account_lane_is_current(&fetched, live))
+        {
+            state
+                .codex_account_needs_authentication
+                .insert(fetched.id, needs_authentication);
+        }
+    }
 }
 
 fn save_codex_lane_results(
@@ -381,7 +411,12 @@ pub async fn codex_account_fetch(
     let home_path = target.codex_home_path.clone();
     let email_hint = target.email_hint.clone();
     let workspace_account_id = target.effective_workspace_account_id();
-    let snapshot = tokio::time::timeout(
+    let state = app.state::<Mutex<AppState>>();
+    let generation = state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .provider_refresh_generation;
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(DEFAULT_FETCH_TIMEOUT_SECONDS),
         api.fetch_snapshot_for_workspace(
             &home_path,
@@ -391,8 +426,22 @@ pub async fn codex_account_fetch(
         ),
     )
     .await
-    .map_err(|_| "Timed out waiting for the Codex usage API.".to_string())?
-    .map_err(into_api_message)?;
+    .map_err(|_| "Timed out waiting for the Codex usage API.".to_string())?;
+    if let Ok(live_accounts) = load_codex_accounts()
+        && let Ok(mut state) = state.lock()
+    {
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            &live_accounts,
+            vec![(
+                target.clone(),
+                matches!(&result, Err(CodexApiError::Authentication(_))),
+            )],
+        );
+    }
+    events::emit_codex_accounts_updated(&app);
+    let snapshot = result.map_err(into_api_message)?;
 
     // Persist snapshot to the snapshot store, keyed by account id.
     if let Ok(mut snapshots) = SnapshotStore::new().load()
@@ -543,7 +592,7 @@ fn into_user_message(error: CodexAccountManagerError) -> String {
 
 fn into_api_message(error: CodexApiError) -> String {
     match error {
-        CodexApiError::Message(msg) => msg,
+        CodexApiError::Message(msg) | CodexApiError::Authentication(msg) => msg,
         CodexApiError::Network(e) => format!("network error: {e}"),
         CodexApiError::Parse(e) => format!("failed to parse Codex payload: {e}"),
     }
@@ -608,28 +657,66 @@ pub struct CodexAccountsStateBridge {
     pub display_names: HashMap<Uuid, String>,
     pub account_ordinals: HashMap<Uuid, usize>,
     pub snapshots: HashMap<Uuid, codexbar::codex_accounts::AccountUsageSnapshot>,
+    pub needs_authentication: HashMap<Uuid, bool>,
 }
 
 #[tauri::command]
 pub fn get_codex_accounts_state(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<CodexAccountsStateBridge, String> {
-    let _guard = state.lock().map_err(|e| e.to_string())?;
+    let guard = state.lock().map_err(|e| e.to_string())?;
     let accounts = load_codex_accounts()?;
     let display_names = display_names_by_id(&accounts);
     let account_ordinals = ordinals_by_id(&accounts);
     let snapshots = snapshots_for_accounts(&accounts, codex_account_snapshots()?);
+    let needs_authentication = guard
+        .codex_account_needs_authentication
+        .iter()
+        .filter(|(id, _)| accounts.iter().any(|account| account.id == **id))
+        .map(|(id, needs)| (*id, *needs))
+        .collect();
     Ok(CodexAccountsStateBridge {
         accounts,
         display_names,
         account_ordinals,
         snapshots,
+        needs_authentication,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authentication_status_recovers_and_rejects_stale_accounts() {
+        let mut state = AppState::new();
+        let generation = state.provider_refresh_generation;
+        let account = sample_account();
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), true)],
+        );
+        assert!(state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(
+            &mut state,
+            generation + 1,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), false)],
+        );
+        assert!(state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), false)],
+        );
+        assert!(!state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(&mut state, generation, &[], vec![(account, true)]);
+        assert!(state.codex_account_needs_authentication.is_empty());
+    }
 
     #[test]
     fn committed_switch_tolerates_unreadable_account_metadata() {
