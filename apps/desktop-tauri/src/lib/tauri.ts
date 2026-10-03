@@ -541,8 +541,8 @@ export function codexAccountAdd(): Promise<CodexAccount> {
   return invoke<CodexAccount>("codex_account_add");
 }
 
-export function codexAccountReauthenticate(): Promise<CodexAccount> {
-  return invoke<CodexAccount>("codex_account_reauthenticate");
+export function codexAccountReauthenticate(id?: string): Promise<CodexAccount> {
+  return invoke<CodexAccount>("codex_account_reauthenticate", id ? { id } : undefined);
 }
 
 export function codexAccountRemove(id: string): Promise<void> {

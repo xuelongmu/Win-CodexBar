@@ -129,7 +129,7 @@ export default function CodexAccountsMenu({
             type="button"
             className="codex-menu-accounts__action"
             disabled={busy}
-            onClick={() => void run(codexAccountReauthenticate, true)}
+            onClick={() => void run(() => codexAccountReauthenticate(), true)}
           >
             {t("CodexAccountsReauthenticateButton")}
           </button>
@@ -145,7 +145,7 @@ export default function CodexAccountsMenu({
           {error}
         </div>
       )}
-      {accounts.length > 1 && (
+      {accounts.length > 0 && (
         <ul className="codex-menu-accounts__list">
           {accounts.map((account) => {
             const label = accountDisplayNames[account.id];
@@ -160,6 +160,7 @@ export default function CodexAccountsMenu({
                 resetTimeRelative={resetTimeRelative}
                 busy={busy}
                 onSwitch={handleSwitch}
+                onReauthenticate={(id) => run(() => codexAccountReauthenticate(id), true)}
               />
             );
           })}
@@ -178,6 +179,7 @@ function CodexAccountRow({
   resetTimeRelative,
   busy,
   onSwitch,
+  onReauthenticate,
 }: {
   account: CodexAccount;
   snapshot: CodexAccountUsageSnapshot | undefined;
@@ -187,6 +189,7 @@ function CodexAccountRow({
   resetTimeRelative: boolean;
   busy: boolean;
   onSwitch: (id: string) => Promise<void>;
+  onReauthenticate: (id: string) => Promise<void>;
 }) {
   const { t } = useLocale();
   const isAmbient = account.source === "ambient";
@@ -218,14 +221,27 @@ function CodexAccountRow({
             <span className="codex-menu-accounts__usage">{t("CodexAccountsUsageUnavailable")}</span>
           )}
         </div>
-        <button
-          type="button"
-          className="codex-menu-accounts__switch"
-          disabled={busy || isAmbient}
-          onClick={() => void onSwitch(account.id)}
-        >
-          {t("CodexAccountsSwitchButton")}
-        </button>
+        <div className="codex-menu-accounts__row-actions">
+          {!isAmbient && (
+            <button
+              type="button"
+              className="codex-menu-accounts__switch"
+              disabled={busy}
+              aria-label={`${t("CodexAccountsReauthenticateButton")}: ${displayName}`}
+              onClick={() => void onReauthenticate(account.id)}
+            >
+              {t("CodexAccountsReauthenticateButton")}
+            </button>
+          )}
+          <button
+            type="button"
+            className="codex-menu-accounts__switch"
+            disabled={busy || isAmbient}
+            onClick={() => void onSwitch(account.id)}
+          >
+            {t("CodexAccountsSwitchButton")}
+          </button>
+        </div>
       </div>
     </li>
   );

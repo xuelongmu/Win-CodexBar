@@ -124,12 +124,12 @@ export function CodexAccountsSection({ t, hidePersonalInfo = false }: Props) {
     }
   };
 
-  const handleReauthenticate = async () => {
+  const handleReauthenticate = async (id: string) => {
     setBusy(true);
     setError(null);
     setSwitchResult(null);
     try {
-      await codexAccountReauthenticate();
+      await codexAccountReauthenticate(id);
       await load();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -254,16 +254,14 @@ export function CodexAccountsSection({ t, hidePersonalInfo = false }: Props) {
                       </span>
                     </div>
                     <div className="credential-card__actions">
-                      {account.source === "ambient" && (
-                        <button
-                          type="button"
-                          className="credential-btn credential-btn--secondary"
-                          disabled={busy}
-                          onClick={() => void handleReauthenticate()}
-                        >
-                          {t("CodexAccountsReauthenticateButton")}
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="credential-btn credential-btn--secondary"
+                        disabled={busy}
+                        onClick={() => void handleReauthenticate(account.id)}
+                      >
+                        {t("CodexAccountsReauthenticateButton")}
+                      </button>
                       <button
                         type="button"
                         className="credential-btn credential-btn--secondary"

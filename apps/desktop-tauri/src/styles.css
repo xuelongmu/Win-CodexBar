@@ -3810,6 +3810,13 @@ html:has(.menu-surface--tray) {
   cursor: pointer;
 }
 
+.codex-menu-accounts__row-actions {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
 .codex-menu-accounts__switch:hover:not(:disabled) {
   border-color: var(--accent, currentColor);
 }

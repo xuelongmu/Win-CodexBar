@@ -218,7 +218,9 @@ function ProviderPill({
   else if (remaining <= highRemaining) tone = "warn";
 
   const brand = getProviderIcon(provider.providerId).brandColor;
-  const label = state.isProblem ? stateLabel : `${Math.round(displayPercent)}%`;
+  const label = state.isProblem ? "!" : `${Math.round(displayPercent)}%`;
+  const lastPercentageLabel = useRef("0%");
+  if (!state.isProblem) lastPercentageLabel.current = label;
   const resetText = useFormattedResetTime(
     rateWindow.resetsAt,
     rateWindow.resetDescription,
@@ -246,8 +248,13 @@ function ProviderPill({
         <ProviderIcon providerId={provider.providerId} size={iconSize} />
       </span>
       <span className="floatbar__text" data-tauri-drag-region>
-        <span className="floatbar__pct" data-tauri-drag-region>
-          {label}
+        <span className="floatbar__pct" aria-label={state.isProblem ? stateLabel : undefined} data-tauri-drag-region>
+          {state.isProblem ? (
+            <>
+              <span aria-hidden="true" style={{ visibility: "hidden" }}>{lastPercentageLabel.current}</span>
+              <span className="floatbar__warning" aria-hidden="true">!</span>
+            </>
+          ) : label}
         </span>
         {showResetInline && resetText && inlineReset && (
           <span

@@ -108,6 +108,20 @@ describe("CodexAccountsMenu", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Login cancelled");
   });
 
+  it("reauthenticates a single saved account without switching it and reports cancellation", async () => {
+    renderMenu(false, { accounts: [account("expired")], accountOrdinals: { expired: 1 }, snapshots: {} });
+    const refresh = await screen.findByRole("button", {
+      name: "CodexAccountsReauthenticateButton: user-expired@example.com",
+    });
+    await waitFor(() => expect(refresh).toBeEnabled());
+    tauriMocks.codexAccountReauthenticate.mockRejectedValueOnce(new Error("Account setup cancelled."));
+    await act(async () => { refresh.click(); });
+    expect(tauriMocks.codexAccountReauthenticate).toHaveBeenCalledWith("expired");
+    expect(tauriMocks.codexAccountSwitch).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Account setup cancelled.");
+    expect(refresh).toBeEnabled();
+  });
+
   it("shows both quota windows for each account without expanding a disclosure", async () => {
     const both = { ...snapshot(30), secondaryWindow: { usedPercent: 65, resetAt: null, limitWindowSeconds: 604800 } };
     const { container } = renderMenu(false, {
