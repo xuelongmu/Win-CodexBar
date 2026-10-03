@@ -184,7 +184,7 @@ describe("GeneralTab language picker", () => {
     expect(set).toHaveBeenCalledWith({ notificationSoundTheme: "codexBar" });
   });
 
-  it("renders and previews all seven notification events", () => {
+  it("renders and previews all seven notification events", async () => {
     render(
       <GeneralTab mode="notifications" settings={settings} set={vi.fn()} saving={false} />,
     );
@@ -202,6 +202,10 @@ describe("GeneralTab language picker", () => {
     expect(invoke).toHaveBeenCalledWith("play_notification_sound", {
       event: "sessionRestored",
     });
+    await waitFor(
+      () => previewButtons.forEach((button) => expect(button).toBeEnabled()),
+      { timeout: 3000 },
+    );
   });
 
   it("assigns and clears a custom WAV for one notification", async () => {
