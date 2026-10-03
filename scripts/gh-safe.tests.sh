@@ -17,9 +17,10 @@ if [[ "${FAKE_GH_MODE:-ok}" == cross ]]; then
   exit 0
 fi
 if [[ "${1:-}" == repo && "${2:-}" == view ]]; then
-  printf '%s\n' 'nesszer/Win-CodexBar|https://github.com/nesszer/Win-CodexBar'
+  repo="${FAKE_GH_REPO:-nesszer/Win-CodexBar}"
+  printf '%s|https://github.com/%s\n' "$repo" "$repo"
 elif [[ "${1:-}" == pr && "${2:-}" == view ]]; then
-  printf '%s\n' 'https://github.com/nesszer/Win-CodexBar/pull/361'
+  printf 'https://github.com/%s/pull/361\n' "${FAKE_GH_REPO:-nesszer/Win-CodexBar}"
 elif [[ "${1:-}" == issue && "${2:-}" == view ]]; then
   printf '%s\n' 'https://github.com/nesszer/Win-CodexBar/issues/123'
 elif [[ "${1:-}" == api ]]; then
@@ -114,5 +115,27 @@ bash "$repo_root/scripts/gh-safe.sh" \
 bash "$repo_root/scripts/gh-safe.sh" \
   --repo nesszer/Win-CodexBar --verify-kind release --target v1.2.3 --what-if -- \
   release upload v1.2.3 dist/app.zip >/dev/null
+
+: > "$log"
+FAKE_GH_REPO=xuelongmu/Win-CodexBar bash "$repo_root/scripts/gh-safe.sh" \
+  --repo xuelongmu/Win-CodexBar --verify-kind repo -- \
+  pr create --title test --body test >/dev/null
+
+grep -Fq 'pr create --title test --body test --repo xuelongmu/Win-CodexBar' "$log" || {
+  echo 'Safe wrapper did not bind the fork repository on creation.' >&2
+  exit 1
+}
+
+FAKE_GH_REPO=xuelongmu/Win-CodexBar bash "$repo_root/scripts/gh-safe.sh" \
+  --repo xuelongmu/Win-CodexBar --verify-kind pr --target 361 --what-if -- \
+  pr edit 361 --title test >/dev/null
+
+FAKE_GH_REPO=nesszer/Win-CodexBar expect_fail bash "$repo_root/scripts/gh-safe.sh" \
+  --repo xuelongmu/Win-CodexBar --verify-kind repo --what-if -- \
+  pr create --title test --body test
+
+FAKE_GH_REPO=nesszer/Win-CodexBar expect_fail bash "$repo_root/scripts/gh-safe.sh" \
+  --repo xuelongmu/Win-CodexBar --verify-kind pr --target 361 --what-if -- \
+  pr edit 361 --title test
 
 echo 'GitHub write-safety shell tests passed.'

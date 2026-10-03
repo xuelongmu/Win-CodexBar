@@ -120,6 +120,8 @@ pub struct AppState {
     pub current_target: SurfaceTarget,
     pub tray_anchor: Option<TrayAnchor>,
     pub provider_cache: Vec<ProviderUsageSnapshot>,
+    pub claude_account_usage: HashMap<String, crate::commands::ClaudeAccountUsageState>,
+    pub codex_account_needs_authentication: HashMap<uuid::Uuid, bool>,
     pub transient_provider_failure_counts: HashMap<ProviderId, u8>,
     pub provider_cache_updated_at: Option<std::time::Instant>,
     /// Per-provider freshness for scoped background refreshes. The aggregate
@@ -192,6 +194,8 @@ impl AppState {
             current_target: SurfaceTarget::Summary,
             tray_anchor: None,
             provider_cache: Vec::new(),
+            claude_account_usage: HashMap::new(),
+            codex_account_needs_authentication: HashMap::new(),
             transient_provider_failure_counts: HashMap::new(),
             provider_cache_updated_at: None,
             provider_cache_updated_at_by_provider: HashMap::new(),

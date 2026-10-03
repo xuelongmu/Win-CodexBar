@@ -17,7 +17,7 @@ pub use login::{begin_login, cancel_login, cleanup_abandoned_logins, login};
 
 pub static CREDENTIAL_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrokAccount {
     pub id: String,
@@ -28,7 +28,7 @@ pub struct GrokAccount {
     pub is_saved: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrokAccountUsage {
     pub usage_available: bool,
@@ -269,6 +269,53 @@ impl AccountManager {
         self.save(&store)
     }
 
+    /// Repair this login while leaving a different ambient account untouched.
+    pub fn reauthenticate(&self, id: &str, login: SavedLogin) -> io::Result<()> {
+        login.validate()?;
+        if login.id()? != id {
+            return Err(io::Error::other(
+                "Sign in with the same Grok account and team to refresh this login.",
+            ));
+        }
+        let mut store = self.load()?;
+        let current = read_login(&self.ambient_auth)?;
+        let active = current
+            .as_ref()
+            .is_some_and(|account| account.id().ok().as_deref() == Some(id));
+        if !active
+            && !store
+                .accounts
+                .iter()
+                .any(|account| account.id().ok().as_deref() == Some(id))
+        {
+            return Err(io::Error::other("Saved Grok account not found."));
+        }
+        let auth = login.auth.clone();
+        upsert(&mut store, login)?;
+        self.save(&store)?;
+        if active {
+            let Some(current) = read_login(&self.ambient_auth)? else {
+                return Ok(());
+            };
+            if current.id()? != id {
+                return Ok(());
+            }
+            let mut ambient = current.auth;
+            for (key, value) in auth
+                .as_object()
+                .ok_or_else(|| io::Error::other("Grok auth.json must be an object."))?
+            {
+                ambient[key] = value.clone();
+            }
+            let staged = stage_json(&self.ambient_auth, &ambient)?;
+            if let Err(error) = replace_staged(&staged, &self.ambient_auth) {
+                let _cleanup = std::fs::remove_file(staged);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove(&self, id: &str) -> io::Result<()> {
         let mut store = self.load()?;
         store
@@ -448,6 +495,48 @@ mod tests {
             serde_json::to_vec_pretty(&login.auth).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn reauthentication_checks_identity_and_preserves_other_accounts() {
+        for active in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = manager(dir.path());
+            let target = login("target", "target@example.test", "old");
+            let mut ambient = if active {
+                target.clone()
+            } else {
+                login("other", "other@example.test", "ambient")
+            };
+            ambient.auth["custom"] = json!({"keep": true});
+            manager.import(target.clone()).unwrap();
+            activate(&manager, &ambient);
+            let before = std::fs::read(&manager.ambient_auth).unwrap();
+            let before_store = std::fs::read(manager.root.join("accounts.json")).unwrap();
+            let id = target.id().unwrap();
+            assert!(
+                manager
+                    .reauthenticate(&id, login("wrong", "wrong@example.test", "new"))
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(manager.root.join("accounts.json")).unwrap(),
+                before_store
+            );
+            assert_eq!(std::fs::read(&manager.ambient_auth).unwrap(), before);
+            manager
+                .reauthenticate(&id, login("target", "target@example.test", "new"))
+                .unwrap();
+            assert_eq!(manager.load().unwrap().accounts.len(), 1);
+            assert!(manager.auth_text_for(&id).unwrap().contains("refresh-new"));
+            if active {
+                let current = read_login(&manager.ambient_auth).unwrap().unwrap();
+                assert!(current.auth.to_string().contains("refresh-new"));
+                assert_eq!(current.auth["custom"]["keep"], true);
+            } else {
+                assert_eq!(std::fs::read(&manager.ambient_auth).unwrap(), before);
+            }
+        }
     }
 
     #[test]

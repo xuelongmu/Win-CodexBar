@@ -137,14 +137,10 @@ pub(crate) async fn refresh_codex_account_lanes(
             )
             .await
             {
-                Ok(Ok(snapshot)) => Some((account, snapshot)),
+                Ok(Ok(snapshot)) => Some((account, Ok(snapshot))),
                 Ok(Err(e)) => {
-                    tracing::debug!(
-                        "codex account lane {} failed: {}",
-                        account.id,
-                        into_api_message(e)
-                    );
-                    None
+                    tracing::debug!("codex account lane {} failed: {}", account.id, e);
+                    Some((account, Err(e)))
                 }
                 Err(_) => {
                     tracing::debug!("codex account lane {} timed out", account.id);
@@ -155,21 +151,55 @@ pub(crate) async fn refresh_codex_account_lanes(
     }
 
     let mut updates = Vec::new();
+    let mut authentication = Vec::new();
     for handle in handles {
-        if let Ok(Some((fetched_account, snapshot))) = handle.await {
-            updates.push((fetched_account, snapshot));
+        if let Ok(Some((fetched_account, result))) = handle.await {
+            authentication.push((
+                fetched_account.clone(),
+                matches!(&result, Err(CodexApiError::Authentication(_))),
+            ));
+            if let Ok(snapshot) = result {
+                updates.push((fetched_account, snapshot));
+            }
         }
     }
     // Hold the generation owner through the read/merge/write so an invalidated
     // batch cannot overwrite a replacement batch's account snapshots.
     let state = app.state::<Mutex<AppState>>();
-    let Ok(state) = state.lock() else { return };
+    let Ok(mut state) = state.lock() else { return };
     match save_codex_lane_results(&state, generation, updates) {
         Ok(false) => return,
         Err(e) => tracing::warn!("codex account lanes: failed to persist snapshots: {e}"),
         Ok(true) => {}
     }
+    if let Ok(live_accounts) = load_codex_accounts() {
+        publish_codex_authentication(&mut state, generation, &live_accounts, authentication);
+    }
     events::emit_codex_accounts_updated(&app);
+}
+
+fn publish_codex_authentication(
+    state: &mut AppState,
+    generation: u64,
+    live_accounts: &[CodexAccount],
+    results: Vec<(CodexAccount, bool)>,
+) {
+    if !is_current_provider_refresh_generation(state, generation) {
+        return;
+    }
+    state
+        .codex_account_needs_authentication
+        .retain(|id, _| live_accounts.iter().any(|account| account.id == *id));
+    for (fetched, needs_authentication) in results {
+        if live_accounts
+            .iter()
+            .any(|live| live.id == fetched.id && account_lane_is_current(&fetched, live))
+        {
+            state
+                .codex_account_needs_authentication
+                .insert(fetched.id, needs_authentication);
+        }
+    }
 }
 
 fn save_codex_lane_results(
@@ -223,13 +253,16 @@ pub async fn codex_account_add(app: tauri::AppHandle) -> Result<CodexAccount, St
     Ok(account)
 }
 
-/// Re-run the official Codex login flow for the ambient account without
-/// changing account ownership or copying credentials into a managed home.
+/// Re-run the official Codex login flow in the selected account's existing
+/// home. Omitting the id retains the ambient-account behavior.
 #[tauri::command]
-pub async fn codex_account_reauthenticate(app: tauri::AppHandle) -> Result<CodexAccount, String> {
+pub async fn codex_account_reauthenticate(
+    app: tauri::AppHandle,
+    id: Option<String>,
+) -> Result<CodexAccount, String> {
     let runtime = CodexAccountRuntime::new();
     let _mutation = runtime.try_begin_mutation().map_err(into_user_message)?;
-    let target = ambient_account(&load_codex_accounts()?)?;
+    let target = reauthentication_target(&load_codex_accounts()?, id.as_deref())?;
     let manager = CodexAccountManager::new();
     let authenticated =
         tauri::async_runtime::spawn_blocking(move || manager.reauthenticate(&target, None))
@@ -237,7 +270,7 @@ pub async fn codex_account_reauthenticate(app: tauri::AppHandle) -> Result<Codex
             .map_err(|e| e.to_string())?
             .map_err(into_user_message)?;
 
-    // The login flow replaced the ambient auth file. Reconcile the identity
+    // The login flow replaced the selected home's auth file. Reconcile the identity
     // before refreshing usage so every surface observes the new session. The
     // logged-in record is transient: reconciliation can drop or replace the
     // ambient identity, so report only a record that was actually persisted.
@@ -378,7 +411,12 @@ pub async fn codex_account_fetch(
     let home_path = target.codex_home_path.clone();
     let email_hint = target.email_hint.clone();
     let workspace_account_id = target.effective_workspace_account_id();
-    let snapshot = tokio::time::timeout(
+    let state = app.state::<Mutex<AppState>>();
+    let generation = state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .provider_refresh_generation;
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(DEFAULT_FETCH_TIMEOUT_SECONDS),
         api.fetch_snapshot_for_workspace(
             &home_path,
@@ -388,8 +426,22 @@ pub async fn codex_account_fetch(
         ),
     )
     .await
-    .map_err(|_| "Timed out waiting for the Codex usage API.".to_string())?
-    .map_err(into_api_message)?;
+    .map_err(|_| "Timed out waiting for the Codex usage API.".to_string())?;
+    if let Ok(live_accounts) = load_codex_accounts()
+        && let Ok(mut state) = state.lock()
+    {
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            &live_accounts,
+            vec![(
+                target.clone(),
+                matches!(&result, Err(CodexApiError::Authentication(_))),
+            )],
+        );
+    }
+    events::emit_codex_accounts_updated(&app);
+    let snapshot = result.map_err(into_api_message)?;
 
     // Persist snapshot to the snapshot store, keyed by account id.
     if let Ok(mut snapshots) = SnapshotStore::new().load()
@@ -467,6 +519,20 @@ fn ambient_account(accounts: &[CodexAccount]) -> Result<CodexAccount, String> {
         .ok_or_else(|| "No ambient Codex account found.".to_string())
 }
 
+fn reauthentication_target(
+    accounts: &[CodexAccount],
+    id: Option<&str>,
+) -> Result<CodexAccount, String> {
+    match id {
+        None => ambient_account(accounts),
+        Some(id) => accounts
+            .iter()
+            .find(|account| account.id.to_string() == id)
+            .cloned()
+            .ok_or_else(|| "Codex account not found.".to_string()),
+    }
+}
+
 /// The account a reauthentication command should report.
 ///
 /// The persisted reconciled set is authoritative. A login that changes the
@@ -477,10 +543,25 @@ fn ambient_account(accounts: &[CodexAccount]) -> Result<CodexAccount, String> {
 /// stores that contain no ambient record.
 /// When neither is present the login was never committed, so the command fails
 /// instead of exposing a dropped or replaced transient account.
+/// Managed logins resolve within their own home, preferring the stable account
+/// id when several saved workspace accounts share that home.
 fn canonical_reauthenticated_account(
     accounts: &[CodexAccount],
     authenticated: &CodexAccount,
 ) -> Result<CodexAccount, String> {
+    if authenticated.source.owns_files() {
+        let same_home = |account: &&CodexAccount| {
+            account.source.owns_files()
+                && account.standardized_home_path() == authenticated.standardized_home_path()
+        };
+        return accounts
+            .iter()
+            .filter(same_home)
+            .find(|account| account.id == authenticated.id)
+            .or_else(|| accounts.iter().find(same_home))
+            .cloned()
+            .ok_or_else(|| "Codex account login was not persisted.".to_string());
+    }
     if let Some(account) = accounts
         .iter()
         .find(|account| account.source == codexbar::codex_accounts::CodexAccountSource::Ambient)
@@ -511,7 +592,7 @@ fn into_user_message(error: CodexAccountManagerError) -> String {
 
 fn into_api_message(error: CodexApiError) -> String {
     match error {
-        CodexApiError::Message(msg) => msg,
+        CodexApiError::Message(msg) | CodexApiError::Authentication(msg) => msg,
         CodexApiError::Network(e) => format!("network error: {e}"),
         CodexApiError::Parse(e) => format!("failed to parse Codex payload: {e}"),
     }
@@ -576,28 +657,66 @@ pub struct CodexAccountsStateBridge {
     pub display_names: HashMap<Uuid, String>,
     pub account_ordinals: HashMap<Uuid, usize>,
     pub snapshots: HashMap<Uuid, codexbar::codex_accounts::AccountUsageSnapshot>,
+    pub needs_authentication: HashMap<Uuid, bool>,
 }
 
 #[tauri::command]
 pub fn get_codex_accounts_state(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<CodexAccountsStateBridge, String> {
-    let _guard = state.lock().map_err(|e| e.to_string())?;
+    let guard = state.lock().map_err(|e| e.to_string())?;
     let accounts = load_codex_accounts()?;
     let display_names = display_names_by_id(&accounts);
     let account_ordinals = ordinals_by_id(&accounts);
     let snapshots = snapshots_for_accounts(&accounts, codex_account_snapshots()?);
+    let needs_authentication = guard
+        .codex_account_needs_authentication
+        .iter()
+        .filter(|(id, _)| accounts.iter().any(|account| account.id == **id))
+        .map(|(id, needs)| (*id, *needs))
+        .collect();
     Ok(CodexAccountsStateBridge {
         accounts,
         display_names,
         account_ordinals,
         snapshots,
+        needs_authentication,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authentication_status_recovers_and_rejects_stale_accounts() {
+        let mut state = AppState::new();
+        let generation = state.provider_refresh_generation;
+        let account = sample_account();
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), true)],
+        );
+        assert!(state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(
+            &mut state,
+            generation + 1,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), false)],
+        );
+        assert!(state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(
+            &mut state,
+            generation,
+            std::slice::from_ref(&account),
+            vec![(account.clone(), false)],
+        );
+        assert!(!state.codex_account_needs_authentication[&account.id]);
+        publish_codex_authentication(&mut state, generation, &[], vec![(account, true)]);
+        assert!(state.codex_account_needs_authentication.is_empty());
+    }
 
     #[test]
     fn committed_switch_tolerates_unreadable_account_metadata() {
@@ -880,7 +999,38 @@ mod tests {
         // A failed persistence leaves no committed reconciled set; the transient
         // login result must not be surfaced in its place.
         let error = canonical_reauthenticated_account(&[], &authenticated).unwrap_err();
-        assert_eq!(error, "No ambient Codex account found.");
+        assert_eq!(error, "Codex account login was not persisted.");
+    }
+
+    #[test]
+    fn reauthentication_targets_saved_home_without_switching_to_ambient() {
+        let managed = sample_account();
+        let mut ambient = sample_account();
+        ambient.source = codexbar::codex_accounts::CodexAccountSource::Ambient;
+        let accounts = [managed.clone(), ambient.clone()];
+        let selected = reauthentication_target(&accounts, Some(&managed.id.to_string())).unwrap();
+        assert_eq!(selected.id, managed.id);
+        assert_eq!(selected.codex_home_path, managed.codex_home_path);
+        assert_eq!(
+            reauthentication_target(&accounts, None).unwrap().id,
+            ambient.id
+        );
+        assert!(reauthentication_target(&accounts, Some("missing")).is_err());
+    }
+
+    #[test]
+    fn managed_reauthentication_reports_its_persisted_home_not_ambient() {
+        let authenticated = sample_account();
+        let mut replacement = authenticated.clone();
+        replacement.id = Uuid::new_v4();
+        replacement.provider_account_id = Some("replacement-workspace".into());
+        let mut ambient = sample_account();
+        ambient.source = codexbar::codex_accounts::CodexAccountSource::Ambient;
+        let selected =
+            canonical_reauthenticated_account(&[ambient, replacement.clone()], &authenticated)
+                .unwrap();
+        assert_eq!(selected.id, replacement.id);
+        assert_eq!(selected.source, authenticated.source);
     }
 
     #[test]

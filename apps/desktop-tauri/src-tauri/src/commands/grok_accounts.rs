@@ -1,8 +1,9 @@
 use super::invalidate_account_usage;
 use crate::state::AppState;
-use codexbar::core::ProviderId;
+use codexbar::core::{ProviderError, ProviderId};
 use codexbar::providers::grok::GrokProvider;
 use codexbar::providers::grok::accounts::{self, AccountManager, GrokAccount, GrokAccountUsage};
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::Emitter;
 use tauri::Manager;
@@ -14,6 +15,25 @@ pub fn grok_accounts_list() -> Result<Vec<GrokAccount>, String> {
     AccountManager::new()
         .and_then(|m| m.list())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_grok_accounts_state(
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<Vec<GrokAccount>, String> {
+    if state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .proof_config
+        .is_some()
+        && let Some(accounts) = crate::proof_harness::seed_grok_accounts_from_env()
+    {
+        return Ok(accounts
+            .into_iter()
+            .map(|account| account.account)
+            .collect());
+    }
+    grok_accounts_list()
 }
 
 fn changed(app: &tauri::AppHandle) {
@@ -37,7 +57,7 @@ fn refresh_after_grok_change(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn grok_account_add(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn grok_account_add(app: tauri::AppHandle, id: Option<String>) -> Result<(), String> {
     let _mutation = MUTATION
         .try_lock()
         .map_err(|_| "A Grok account operation is already in progress.")?;
@@ -49,11 +69,14 @@ pub async fn grok_account_add(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let _credentials = accounts::CREDENTIAL_OPERATION.lock().await;
     AccountManager::new()
-        .and_then(|m| m.import(login))
+        .and_then(|m| match id.as_deref() {
+            Some(id) => m.reauthenticate(id, login),
+            None => m.import(login),
+        })
         .map_err(|e| e.to_string())?;
     crate::auto_resume::clear(&app, ProviderId::Grok);
-    changed(&app);
-    Ok(())
+    drop(_credentials);
+    refresh_after_grok_change(app)
 }
 
 #[tauri::command]
@@ -90,14 +113,79 @@ pub async fn grok_account_remove(app: tauri::AppHandle, id: String) -> Result<()
 }
 
 #[tauri::command]
-pub async fn grok_account_fetch(id: String) -> Result<GrokAccountUsage, String> {
+pub async fn grok_account_fetch(
+    state: tauri::State<'_, Mutex<AppState>>,
+    id: String,
+) -> Result<GrokAccountUsageState, String> {
+    if state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .proof_config
+        .is_some()
+        && let Some(accounts) = crate::proof_harness::seed_grok_accounts_from_env()
+        && let Some(account) = accounts
+            .into_iter()
+            .find(|account| account.account.id == id)
+    {
+        return Ok(account.usage);
+    }
     let text = AccountManager::new()
         .and_then(|m| m.auth_text_for(&id))
         .map_err(|e| e.to_string())?;
-    GrokProvider::new()
-        .fetch_usage_from_auth_json(&text)
-        .await
-        .map_err(|e| e.to_string())
+    Ok(account_usage_state(
+        GrokProvider::new().fetch_usage_from_auth_json(&text).await,
+    ))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrokAccountUsageState {
+    #[serde(flatten)]
+    pub usage: GrokAccountUsage,
+    pub needs_authentication: bool,
+    pub usage_error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GrokAccountProof {
+    pub account: GrokAccount,
+    pub usage: GrokAccountUsageState,
+}
+
+fn account_usage_state(result: Result<GrokAccountUsage, ProviderError>) -> GrokAccountUsageState {
+    match result {
+        Ok(usage) => GrokAccountUsageState {
+            usage,
+            needs_authentication: false,
+            usage_error: None,
+        },
+        Err(error) => {
+            let needs_authentication = matches!(
+                error,
+                ProviderError::AuthRequired
+                    | ProviderError::OAuthExpired(_)
+                    | ProviderError::OAuthRevoked(_)
+            );
+            GrokAccountUsageState {
+                usage: GrokAccountUsage {
+                    usage_available: false,
+                    used_percent: None,
+                    plan: None,
+                    window_minutes: None,
+                    resets_at: None,
+                },
+                needs_authentication,
+                usage_error: Some(
+                    if needs_authentication {
+                        "Sign in again to check this Grok account."
+                    } else {
+                        "Grok usage check failed. Will retry automatically."
+                    }
+                    .into(),
+                ),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -112,4 +200,28 @@ pub async fn grok_account_switch(app: tauri::AppHandle, id: String) -> Result<()
         .map_err(|e| e.to_string())?;
     drop(_credentials);
     refresh_after_grok_change(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_authentication_errors_offer_login() {
+        assert!(account_usage_state(Err(ProviderError::AuthRequired)).needs_authentication);
+        assert!(
+            !account_usage_state(Err(ProviderError::Other("API error 500".into())))
+                .needs_authentication
+        );
+        assert!(
+            !account_usage_state(Ok(GrokAccountUsage {
+                usage_available: false,
+                used_percent: None,
+                plan: None,
+                window_minutes: None,
+                resets_at: None
+            }))
+            .needs_authentication
+        );
+    }
 }

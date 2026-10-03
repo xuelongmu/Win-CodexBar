@@ -3,6 +3,7 @@ import type { GrokAccount, GrokAccountUsage } from "../../../../../types/bridge"
 import type { LocaleKey } from "../../../../../i18n/keys";
 import {
   grokAccountAdd,
+  grokAccountReauthenticate,
   grokAccountCancelLogin,
   grokAccountSaveCurrent,
   grokAccountRemove,
@@ -52,6 +53,15 @@ export function GrokAccountsSection({ t }: { t: (key: LocaleKey) => string }) {
                 )}
               </div>
               <div className="credential-card__actions">
+                {usage[account.id]?.needsAuthentication && <button
+                  className="credential-btn credential-btn--secondary"
+                  disabled={busy}
+                  aria-label={`${t("CodexAccountsReauthenticateButton")}: ${account.email}`}
+                  onClick={() => {
+                    setLoggingIn(true);
+                    runOperation(() => grokAccountReauthenticate(account.id));
+                  }}
+                >{t("CodexAccountsReauthenticateButton")}</button>}
                 {!account.isActive && account.isSaved && (
                   <button
                     className="credential-btn credential-btn--primary"

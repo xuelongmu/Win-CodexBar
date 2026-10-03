@@ -260,8 +260,32 @@ pub fn is_proof_mode(app: &AppHandle) -> bool {
 // ── Provider-usage seed (CODEXBAR_SEED_USAGE_JSON) ───────────────────
 
 /// Environment variable pointing at a JSON file with one synthetic,
-/// bridge-shaped `ProviderUsageSnapshot` for the codex provider.
+/// bridge-shaped `ProviderUsageSnapshot` for the Codex or Claude provider.
 pub const SEED_USAGE_ENV_VAR: &str = "CODEXBAR_SEED_USAGE_JSON";
+
+/// Synthetic account rows are available only through a proof-mode command.
+pub fn seed_claude_accounts_from_env() -> Option<Vec<crate::commands::ClaudeAccountState>> {
+    let path = std::env::var_os("CODEXBAR_SEED_CLAUDE_ACCOUNTS_JSON")?;
+    let result = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    if result.is_none() {
+        tracing::warn!("Invalid Claude account proof seed; using real account metadata");
+    }
+    result
+}
+
+/// Credential-free Grok account fixtures, used only by proof-mode commands.
+pub fn seed_grok_accounts_from_env() -> Option<Vec<crate::commands::GrokAccountProof>> {
+    let path = std::env::var_os("CODEXBAR_SEED_GROK_ACCOUNTS_JSON")?;
+    let result = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    if result.is_none() {
+        tracing::warn!("Invalid Grok account proof seed; using real account metadata");
+    }
+    result
+}
 
 /// Whether a seed path was configured at launch. While set, the provider
 /// cache is pinned fresh so the synthetic snapshot is never evicted by an
@@ -274,7 +298,7 @@ pub fn seed_usage_json_active() -> bool {
 ///
 /// Returns `None` (with a warn, never a crash) when the variable is unset,
 /// the file is unreadable, the JSON is malformed, or the snapshot is not
-/// for the `codex` provider.
+/// for the Codex or Claude provider.
 pub fn seed_usage_snapshot_from_env() -> Option<ProviderUsageSnapshot> {
     let path = std::env::var_os(SEED_USAGE_ENV_VAR)?;
     let path = std::path::PathBuf::from(path);
@@ -305,16 +329,16 @@ pub fn seed_usage_snapshot_from_env() -> Option<ProviderUsageSnapshot> {
 /// computed defaults that serde cannot express from sibling fields
 /// (`remainingPercent` from `usedPercent`, `formattedUsed` from `used`,
 /// `updatedAt` from the current time) and validates that the snapshot is
-/// for the `codex` provider.
+/// for the Codex or Claude provider.
 ///
 /// Pure: no env vars, no files, no global state.
 pub fn parse_seed_usage_snapshot(json: &str) -> Result<ProviderUsageSnapshot, String> {
     let mut snapshot: ProviderUsageSnapshot =
         serde_json::from_str(json).map_err(|e| format!("malformed JSON: {e}"))?;
 
-    if snapshot.provider_id != "codex" {
+    if !matches!(snapshot.provider_id.as_str(), "codex" | "claude") {
         return Err(format!(
-            "snapshot providerId '{}' is not 'codex', ignoring",
+            "snapshot providerId '{}' is not 'codex' or 'claude', ignoring",
             snapshot.provider_id
         ));
     }
@@ -560,7 +584,7 @@ mod tests {
 
     #[test]
     fn parse_seed_snapshot_rejects_non_codex_provider() {
-        let json = r#"{"providerId": "claude", "primary": {"usedPercent": 10.0}}"#;
+        let json = r#"{"providerId": "grok", "primary": {"usedPercent": 10.0}}"#;
         assert!(parse_seed_usage_snapshot(json).is_err());
     }
 

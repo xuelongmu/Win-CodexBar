@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import type { GrokAccount, GrokAccountUsage } from "../types/bridge";
-import { grokAccountSwitch } from "../lib/tauri";
+import { grokAccountAdd, grokAccountReauthenticate, grokAccountCancelLogin, grokAccountSwitch } from "../lib/tauri";
 import { useLocale } from "../hooks/useLocale";
 import { useFormattedResetTime } from "../hooks/useFormattedResetTime";
 import { useGrokAccounts } from "../hooks/useGrokAccounts";
 import { maskEmail } from "./MenuCard";
+import ProviderAccountsMenu from "./ProviderAccountsMenu";
 
 export default function GrokAccountsMenu({
   hideEmail,
@@ -17,32 +18,44 @@ export default function GrokAccountsMenu({
 }) {
   const { t } = useLocale();
   const [switched, setSwitched] = useState(false);
-  const { accounts, usage, busy, error, run } = useGrokAccounts({ reloadOnFocus: true });
+  const [signingIn, setSigningIn] = useState(false);
+  const { accounts, usage, busy, error, reportError, run } = useGrokAccounts({ reloadOnFocus: true });
   useEffect(() => {
     onLayoutChange?.();
-  }, [accounts.length, error, switched, onLayoutChange]);
+  }, [accounts, error, switched, signingIn, onLayoutChange]);
 
   const switchAccount = async (id: string) => {
     setSwitched(false);
     await run(() => grokAccountSwitch(id), () => setSwitched(true));
   };
 
-  const hasSwitchableAccount = accounts.some(
-    (account) => account.isSaved && !account.isActive,
-  );
-  if (accounts.length <= 1 && !hasSwitchableAccount && !error) return null;
+  const addAccount = (id?: string) => {
+    setSwitched(false);
+    setSigningIn(true);
+    void run(id ? () => grokAccountReauthenticate(id) : grokAccountAdd, undefined, () => setSigningIn(false));
+  };
   return (
-    <details className="codex-menu-accounts" onToggle={onLayoutChange}>
-      <summary className="codex-menu-accounts__summary">
-        <span className="codex-menu-accounts__title">{t("GrokAccountsTitle")}</span>
-        <span className="codex-menu-accounts__count">{accounts.length}</span>
-      </summary>
+    <ProviderAccountsMenu
+      title={t("GrokAccountsTitle")}
+      count={accounts.length}
+      aria-busy={busy}
+      onLayoutChange={onLayoutChange}
+      actions={<>
+        <button type="button" className="codex-menu-accounts__action" disabled={busy} onClick={() => addAccount()}>
+          {t("CodexAccountsAddButton")}
+        </button>
+        {signingIn && <button type="button" className="codex-menu-accounts__action" onClick={() => void grokAccountCancelLogin().catch(reportError)}>
+          {t("GrokAccountsCancelLogin")}
+        </button>}
+      </>}
+    >
       {error && (
         <div className="codex-menu-accounts__error" role="alert">
           {error}
         </div>
       )}
       {switched && <p role="status">{t("GrokAccountsSwitched")}</p>}
+      {signingIn && <p className="codex-menu-accounts__usage" role="status">{t("GrokAccountsSigningIn")}</p>}
       <ul className="codex-menu-accounts__list">
         {accounts.map((account) => (
           <GrokAccountRow
@@ -53,10 +66,11 @@ export default function GrokAccountsMenu({
             resetTimeRelative={resetTimeRelative}
             busy={busy}
             onSwitch={switchAccount}
+            onReauthenticate={addAccount}
           />
         ))}
       </ul>
-    </details>
+    </ProviderAccountsMenu>
   );
 }
 
@@ -67,6 +81,7 @@ function GrokAccountRow({
   resetTimeRelative,
   busy,
   onSwitch,
+  onReauthenticate,
 }: {
   account: GrokAccount;
   snapshot: GrokAccountUsage | undefined;
@@ -74,6 +89,7 @@ function GrokAccountRow({
   resetTimeRelative: boolean;
   busy: boolean;
   onSwitch: (id: string) => Promise<void>;
+  onReauthenticate: (id: string) => void;
 }) {
   const { t } = useLocale();
   const email = hideEmail ? maskEmail(account.email) : account.email;
@@ -125,15 +141,29 @@ function GrokAccountRow({
               />
             </span>
           )}
+          {snapshot?.usageError && <span className="codex-menu-accounts__error" role="status">{snapshot.usageError}</span>}
         </div>
-        <button
-          type="button"
-          className="codex-menu-accounts__switch"
-          disabled={busy || account.isActive || !account.isSaved}
-          onClick={() => void onSwitch(account.id)}
-        >
-          {t("CodexAccountsSwitchButton")}
-        </button>
+        <div className="codex-menu-accounts__row-actions">
+          {snapshot?.needsAuthentication && (
+            <button
+              type="button"
+              className="codex-menu-accounts__switch"
+              disabled={busy}
+              aria-label={`${t("CodexAccountsReauthenticateButton")}: ${email}`}
+              onClick={() => onReauthenticate(account.id)}
+            >
+              {t("CodexAccountsReauthenticateButton")}
+            </button>
+          )}
+          <button
+            type="button"
+            className="codex-menu-accounts__switch"
+            disabled={busy || account.isActive || !account.isSaved}
+            onClick={() => void onSwitch(account.id)}
+          >
+            {t("CodexAccountsSwitchButton")}
+          </button>
+        </div>
       </div>
     </li>
   );
